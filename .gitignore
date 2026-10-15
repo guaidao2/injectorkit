@@ -1,0 +1,29 @@
+# Reference checkouts are read-only study material, never part of this project.
+.refs/
+
+# Working notes for the agent, not part of the published repository.
+AGENTS.md
+.codegraph/
+
+# Helper binaries the agent uses locally; not part of the project.
+tools/
+
+# Internal design notes and artifacts are not part of the published repository;
+# the README is the document of record that ships.
+docs/
+
+__pycache__/
+*.py[cod]
+.tmp/
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# Session state may contain target-specific evidence.
+sessions/
+*.session.json
+
+# Cross-target priors on which rewrites work, learned at run time.
+.injectorkit/

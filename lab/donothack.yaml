@@ -1,0 +1,40 @@
+# donothack in front of the lab: the third-party baseline.
+#
+# Copy to the donothack directory as `iklab.yaml` (or point -c at this file) and
+# change `upstream.url` to whichever side you are testing:
+#
+#   http://127.0.0.1:8080   the PHP lab - SSRF, LFI, open redirect, split params
+#   http://127.0.0.1:9100   the Java lab - new URL(userInput), so jar:/jrt:/netdoc:
+#
+# `engine.mode: block` so a refused request is a 403 the scanner can see, and
+# `degrade: off` so a refusal is always a refusal rather than a 503.
+#
+# Rate limiting is off on purpose: a scan is being judged on its payloads, not on
+# how fast it sends them, and leaving it on means a scan of any size gets banned
+# partway through and reports a filter that was never really there.
+
+listen:
+  addr: "0.0.0.0:8090"
+
+upstream:
+  url: "http://127.0.0.1:8080"
+
+engine:
+  mode: block
+  degrade: off
+  ban_on_block: false
+  inbound_anomaly_threshold: 5
+
+rules:
+  dir: "./rules"
+  files: ["*.yaml"]
+  self_test: true
+
+ratelimit:
+  enabled: false
+
+log:
+  level: info
+  format: text
+  output: stdout
+  app_output: stderr
