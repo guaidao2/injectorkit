@@ -1,0 +1,11 @@
+# Keep the repository byte-identical wherever it is checked out. The lab scripts
+# run on Linux, and a CRLF in one of them is a "bad interpreter" error rather
+# than a cosmetic difference.
+* text=auto eol=lf
+*.sh text eol=lf
+*.bat text eol=crlf
+
+# Binaries are not text and must not be touched.
+*.exe binary
+*.png binary
+*.gz binary
