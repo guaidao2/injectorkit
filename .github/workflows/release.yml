@@ -1,0 +1,30 @@
+name: release
+
+# Pushing a version tag is the whole trigger. The release notes come from the
+# commit history, so the tag message and the commits leading to it are what
+# people read - write them for that audience.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "InjectorKit $GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag

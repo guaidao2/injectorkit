@@ -1,0 +1,4 @@
+# The only third-party dependency. It is used for the interactsh backend -
+# the RSA handshake and record decryption - and for nothing else, so a run that
+# does not ask for out-of-band callbacks works without it.
+cryptography>=3.4

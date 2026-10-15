@@ -36,10 +36,23 @@ import urllib.request
 from dataclasses import replace
 from typing import Callable
 
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import padding, rsa
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+# The one third-party dependency, and it is only for this file. Loading it
+# defensively means a missing install costs the out-of-band backend rather than
+# the whole tool: a run against a directly reachable target needs no callbacks
+# and no cryptography, and should not fail to start because of either.
+try:
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding, rsa
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    HAVE_CRYPTO = True
+    CRYPTO_ERROR = ""
+except ImportError as error:  # pragma: no cover - depends on the environment
+    HAVE_CRYPTO = False
+    CRYPTO_ERROR = str(error)
+    hashes = serialization = padding = rsa = None  # type: ignore[assignment]
+    Cipher = algorithms = modes = AESGCM = None  # type: ignore[assignment]
 
 from .oob import Interaction
 
@@ -121,6 +134,12 @@ class InteractshClient:
         refuses the key has to be reported before the run starts, not
         discovered as a series of payloads that could never have been answered.
         """
+        if not HAVE_CRYPTO:
+            raise InteractshError(
+                "interactsh needs the cryptography package, which is not installed "
+                f"({CRYPTO_ERROR}). Install it with: pip install cryptography"
+            )
+
         self._key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         self.correlation_id = _xid()
         self.secret = _random_string(32)

@@ -20,10 +20,17 @@ expect the command line and module layout to settle before a first release.
 
 ## Requirements
 
-Python 3.11 or newer. No third-party packages for the core: the tool runs from a
-checkout. Out-of-band testing through an interactsh deployment uses
-`cryptography` (already present in most security tooling environments); without
-it, the local listener still works.
+Python 3.11 or newer. The only third-party package is `cryptography`, and only
+the interactsh backend needs it:
+
+    pip install -r requirements.txt
+
+Everything else is the standard library, and the tool runs from a checkout. The
+import is guarded, so without `cryptography` the out-of-band options tell you
+what to install and every other feature works as usual - including the local
+callback listener, which needs nothing.
+
+    pip install -e .          # optional: get an `injectorkit` command on PATH
 
 ## Usage
 
