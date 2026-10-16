@@ -247,9 +247,13 @@ FastCGI reply.
 
     --shell-name shell.php     what to write the shell as
     --fpm-port 9000            PHP-FPM port, when it is not the default
+    --os-cmd COMMAND           run this once execution is established, and show
+                               what it printed. Without it the chain runs `id`,
+                               which is what proves the chain worked
 
 Both chains need the fingerprint first, so they only fire on a target where that
-service is actually reachable.
+service is actually reachable. What the command printed is shown with the
+results, under `Commands run:` - the same place a file that was read is shown.
 
 ## The pseudo-protocol class
 
@@ -438,18 +442,44 @@ reference response first, and a seed that comes back far slower than the best
 answer so far is left unclimbed rather than spent. The other seeds are still
 tried; nothing was learned about the filter, so nothing is rewarded.
 
-### Running a command
+### Running a command, and keeping it open
 
-`--os-cmd` runs one command through the delivery that was proved to work. The
-marker goes out in the same request as the command, and the response is only
-shown if the marker comes back in it. A separate self-check does not do: the run
-sends a parameter-pollution request before each payload, and on a framework that
-reads the first of a repeated parameter that request carries no payload at all -
-so a check of its own can be satisfied by a request that carried nothing, and the
-command that follows prints the page as though it were output.
+`--os-cmd` runs one command through the delivery that was proved. `--os-shell`
+keeps the injection open and runs what you type, from a terminal or from a pipe:
 
-When the marker does not come back, the tool says the injection stopped working
-between proving it and using it. It does not print the response.
+    python injectorkit.py cmdi -u "http://target/ping?host=x" --exploit --os-cmd 'id'
+    python injectorkit.py cmdi -u "http://target/ping?host=x" --exploit --os-shell
+    printf 'id\nuname -a\nexit\n' | python injectorkit.py cmdi -u ... --exploit --os-shell
+
+A marker goes out on either side of the command, in the same request, and the
+response is only shown if both come back in it. A separate self-check does not
+do: the run sends a parameter-pollution request before each payload, and on a
+framework that reads the first of a repeated parameter that request carries no
+payload at all - so a check of its own can be satisfied by a request that carried
+nothing, and the command that follows prints the page as though it were output.
+Two markers rather than one, because a marker only at the front cannot say where
+the output stopped either.
+
+When they do not come back, the tool says the injection stopped working between
+proving it and using it. It does not print the response.
+
+### Where a command's output is shown
+
+With the results, at the end, under `Commands run:` - the same place a file that
+was read appears under `Files read:`. The progress line says a command ran; the
+summary says what it printed, and exactly once however many times it was run.
+
+    ---
+    Parameter: query:host
+        Test:     command execution (posix)
+        Payload:  ; echo ik3c7caa10; echo $((1705+5751)); echo ik23b29d2d
+        Evidence: the shell printed the sum 7456 between the two markers
+    ---
+
+    Commands run:
+        id; uname -m
+          uid=33(www-data) gid=33(www-data) groups=33(www-data)
+          x86_64
 
 ### What it does not do
 
@@ -490,6 +520,42 @@ session - that is `-C` and `-H`:
 A session belongs to the target it was recorded against. Pointed at a different
 host it is ignored rather than applied, because feeding one host's refusals to
 another is how a resumed scan quietly skips the thing it should have tested.
+
+### What a session keeps, and what it does with it
+
+It keeps what was found, not a list of what was done. The distinction shows up
+the moment you ask for something by name:
+
+    --flush-session                 forget it and start over
+    --read FILE                     ask for a file, on a session or without one
+
+A resumed run does not merely skip the actions that already ran - it re-asks the
+questions and answers them from what was learned. That is why `--read /etc/passwd`
+against a warm session still prints the file, and still costs nothing:
+
+    [+] read /etc/passwd (resumed from an earlier run)
+    ...
+    Files read:
+        /etc/passwd
+          root:x:0:0:root:/root:/bin/bash
+
+Remembering "the read action ran here" would have been enough to skip it, and the
+run would have printed the payload it would have used and nothing else: the file
+was never kept. What is kept is the answer.
+
+Actions that are not a request for a specific thing are still skipped outright -
+there is nothing to show, only work not to redo.
+
+### Where a file that was read is shown
+
+With the results, at the end. `--read FILE` is usually the whole reason the run
+was started, so the content is the answer and it goes where the answers go -
+under `Files read:`, after the finding that says which wrapper reached it.
+
+It is shown once even when several wrappers turn out to reach the same file: the
+progress line names the file, the findings name the ways in, and the file itself
+appears exactly once. Long files are cut off after forty lines with the count of
+what was left out; the whole of it is in the session file.
 
 ## Reading the output
 

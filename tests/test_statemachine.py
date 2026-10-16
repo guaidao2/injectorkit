@@ -45,6 +45,37 @@ class GraphShape(unittest.TestCase):
         self.assertEqual(state.on_exhausted, "finish")
 
 
+class WhatTheOperatorAskedFor(unittest.TestCase):
+    """A cached verdict is not an answer to a request made by hand.
+
+    The session remembers that an action was tried on a page, which is the right
+    thing to skip. But "a file was read here once" is not an answer to "-read
+    that file": a run that skips it because it once succeeded has the payload to
+    show and nothing else - measured on a live target, where `--read /etc/passwd`
+    against a warm session printed the wrapper it would have used and none of
+    the file.
+    """
+
+    def test_an_action_with_no_request_attached_is_never_forced(self):
+        self.assertFalse(action("probe").is_wanted({}))
+        self.assertFalse(action("probe").is_wanted({"read": ["/flag"]}))
+
+    def test_a_named_request_forces_the_action(self):
+        item = Action(id="probe.read", description="read a file", run=noop, wanted="read")
+        self.assertTrue(item.is_wanted({"read": ["/etc/passwd"]}))
+
+    def test_the_request_has_to_actually_be_there(self):
+        item = Action(id="probe.read", description="read a file", run=noop, wanted="read")
+        self.assertFalse(item.is_wanted({}))
+        self.assertFalse(item.is_wanted({"read": []}))
+        self.assertFalse(item.is_wanted({"read": None}))
+
+    def test_an_exploit_request_forces_the_action_that_runs_it(self):
+        item = Action(id="exploit", description="run code", run=noop, wanted="exploit")
+        self.assertTrue(item.is_wanted({"exploit": True}))
+        self.assertFalse(item.is_wanted({"exploit": False}))
+
+
 class Transitions(unittest.TestCase):
     def test_a_transition_names_where_it_leads(self):
         self.assertEqual(Transition(to="next", when=lambda ctx: True).to, "next")

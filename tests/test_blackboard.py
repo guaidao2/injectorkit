@@ -186,5 +186,108 @@ class WhatTheSummaryShows(unittest.TestCase):
         self.assertIn("php://filter/convert.iconv", block)
 
 
+class AFileThatWasRead(unittest.TestCase):
+    """A read is the answer, so it is shown as one - at the end, and once.
+
+    `--read FILE` is the whole point of a run: the operator named a file and the
+    content is what they asked for. It belongs with the results, not in the
+    middle of the progress lines, and not once for every wrapper that turned out
+    to reach it.
+    """
+
+    def board(self) -> Blackboard:
+        from injectorkit.engine.blackboard import READ_FACT_PREFIX
+
+        board = Blackboard(target="t")
+        board.set(
+            READ_FACT_PREFIX + "/etc/passwd",
+            "root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:daemon:/usr/sbin\n",
+            evidence="kept so a later run need not ask again",
+            confidence=Confidence.CONFIRMED,
+        )
+        return board
+
+    def test_the_file_is_shown_with_the_results(self):
+        block = self.board().render_findings()
+        self.assertIn("Files read:", block)
+        self.assertIn("root:x:0:0:root:/root:/bin/bash", block)
+
+    def test_the_file_is_not_also_a_python_literal_in_the_summary(self):
+        rendered = self.board().render()
+        self.assertNotIn("read.file.", rendered)
+        self.assertNotIn("root:x:0:0", rendered)
+
+    def test_a_file_is_listed_once_however_it_was_reached(self):
+        self.assertEqual(len(self.board().reads()), 1)
+
+    def test_an_empty_file_is_not_a_result(self):
+        board = Blackboard(target="t")
+        board.set("read.file./nope", "", evidence="nothing", confidence=Confidence.CONFIRMED)
+        self.assertEqual(board.reads(), [])
+        self.assertNotIn("Files read:", board.render_findings())
+
+    def test_a_file_is_still_listed_after_a_session_is_reloaded(self):
+        board = Blackboard.from_json(self.board().to_json())
+        self.assertIn("Files read:", board.render_findings())
+        self.assertIn("root:x:0:0", board.render_findings())
+
+    def test_only_the_first_lines_are_printed(self):
+        from injectorkit.engine.blackboard import READ_LINES, READ_FACT_PREFIX
+
+        board = Blackboard(target="t")
+        body = "\n".join(f"line {number}" for number in range(READ_LINES + 12))
+        board.set(READ_FACT_PREFIX + "/big", body, evidence="long", confidence=Confidence.CONFIRMED)
+        block = board.render_findings()
+        self.assertIn("line 0", block)
+        self.assertIn("12 more line(s)", block)
+
+    def test_a_board_with_neither_findings_nor_reads_renders_nothing(self):
+        self.assertEqual(Blackboard(target="t").render_findings(), "")
+
+
+class ACommandThatWasRun(unittest.TestCase):
+    """The output of a command is a result, and results go at the end, once.
+
+    `--os-cmd` and `--os-shell` exist to run something on the target and show
+    what came back. Printing it among the progress lines scatters the answer up
+    the screen; printing it here puts it where the findings are, which is where
+    somebody looks when the run stops.
+    """
+
+    def test_the_output_is_shown_with_the_results(self):
+        board = Blackboard(target="t")
+        board.remember_run("id", "uid=33(www-data) gid=33(www-data)\n")
+        block = board.render_findings()
+        self.assertIn("Commands run:", block)
+        self.assertIn("id", block)
+        self.assertIn("uid=33(www-data)", block)
+
+    def test_it_is_not_also_a_python_literal_in_the_summary(self):
+        board = Blackboard(target="t")
+        board.remember_run("id", "uid=33(www-data)\n")
+        self.assertNotIn("run.command.", board.render())
+
+    def test_running_the_same_command_twice_shows_it_once(self):
+        board = Blackboard(target="t")
+        board.remember_run("id", "first\n")
+        board.remember_run("id", "second\n")
+        self.assertEqual(len(board.runs()), 1)
+        self.assertIn("second", board.render_findings())
+
+    def test_a_command_with_no_output_says_so(self):
+        board = Blackboard(target="t")
+        board.remember_run("true", "")
+        self.assertIn("(no output)", board.render_findings())
+
+    def test_it_survives_a_session_reload(self):
+        board = Blackboard(target="t")
+        board.remember_run("id", "uid=33(www-data)\n")
+        reloaded = Blackboard.from_json(board.to_json())
+        self.assertIn("uid=33(www-data)", reloaded.render_findings())
+
+    def test_a_commandless_board_renders_nothing(self):
+        self.assertEqual(Blackboard(target="t").render_findings(), "")
+
+
 if __name__ == "__main__":
     unittest.main()

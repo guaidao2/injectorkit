@@ -76,6 +76,35 @@ def unbound_reads(tree: ast.AST) -> list[tuple[str, int]]:
     return sorted(missing.items(), key=lambda item: item[1])
 
 
+def unpack_mismatches(tree: ast.AST, arities: dict[str, int]) -> list[tuple[str, int, int, int]]:
+    """Calls unpacked into the wrong number of names, with the line.
+
+    The same shape of mistake as an unbound name, and it shipped twice: a helper
+    that returns `(request, exchange)` written as `_, exchange, _ =`, which raises
+    only on the one code path that reaches it - the exploitation chain, where
+    nobody was looking until the tool was pointed at a live target and reported
+    the whole step as `raised ValueError`.
+    """
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                aliases[alias.asname or alias.name] = alias.name
+    problems: list[tuple[str, int, int, int]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        call = node.value
+        if not isinstance(target, ast.Tuple) or not isinstance(call, ast.Call):
+            continue
+        name = getattr(call.func, "id", None) or getattr(call.func, "attr", None)
+        name = aliases.get(name, name)
+        if name in arities and len(target.elts) != arities[name]:
+            problems.append((name, arities[name], len(target.elts), node.lineno))
+    return problems
+
+
 class NoUnboundNames(unittest.TestCase):
     def test_the_package_has_no_file_local_name_errors(self):
         problems: list[str] = []
@@ -89,6 +118,21 @@ class NoUnboundNames(unittest.TestCase):
             problems,
             [],
             "names read but never bound in their file:\n  " + "\n  ".join(problems),
+        )
+
+    def test_every_inject_outcome_is_unpacked_with_the_arity_it_has(self):
+        """`inject` answers with two things and `inject_escalating` with three."""
+        arities = {"inject": 2, "inject_escalating": 3, "_inject": 2, "_inject_escalating": 3}
+        problems: list[str] = []
+        for path in sorted(PACKAGE.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for name, want, got, line in unpack_mismatches(tree, arities):
+                where = path.relative_to(PACKAGE.parent).as_posix()
+                problems.append(f"{where}:{line}: {name} answers with {want}, unpacked as {got}")
+        self.assertEqual(
+            problems,
+            [],
+            "calls unpacked into the wrong number of names:\n  " + "\n  ".join(problems),
         )
 
 
@@ -132,6 +176,15 @@ class TheCheckerItself(unittest.TestCase):
     def test_an_except_binding_satisfies_it(self):
         tree = ast.parse("def f():\n    try:\n        pass\n    except ValueError as error:\n        return error\n")
         self.assertEqual(unbound_reads(tree), [])
+
+    def test_it_reports_an_outcome_unpacked_with_the_wrong_arity(self):
+        tree = ast.parse("def f(ctx):\n    _, exchange, _ = inject(ctx, p, 'x', 'a')\n")
+        problems = unpack_mismatches(tree, {"inject": 2, "inject_escalating": 3})
+        self.assertEqual(problems, [("inject", 2, 3, 2)])
+
+    def test_the_right_arity_is_not_reported(self):
+        tree = ast.parse("def f(ctx):\n    r, e = inject(ctx, p, 'x', 'a')\n")
+        self.assertEqual(unpack_mismatches(tree, {"inject": 2}), [])
 
 
 if __name__ == "__main__":

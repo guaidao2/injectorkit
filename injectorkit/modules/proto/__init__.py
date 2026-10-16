@@ -24,6 +24,7 @@ from ...engine.runner import (
     close_board,
     close_filters,
     collect_targets,
+    emit_summary,
     no_parameters_message,
     open_board,
     open_filters,
@@ -78,10 +79,10 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     exploit.add_argument(
         "--exploit",
         action="store_true",
-        help="prove the target will run code we supply, without running any: send a chain that "
-        "echoes a random marker and report whether it came back. This confirms the capability. "
-        "It does not execute a command - add --os-cmd or --os-shell for that, or --log-path "
-        "for the route that needs no php://filter",
+        help="act on the target: build a php://filter chain and run it there. With --os-cmd "
+        "or --os-shell the chain runs your command; without them it runs a marker, which "
+        "proves the chain works on this target before you put a command in it. "
+        "--log-path is the route that needs no php://filter",
     )
     exploit.add_argument(
         "--make-phar",
@@ -372,16 +373,6 @@ def run_one(request, params, args: argparse.Namespace, runtime) -> None:
     finally:
         # Written even when the run is interrupted: what was learned before a
         # Ctrl+C is exactly what a resumed run needs.
-        runtime.emit("")
-        runtime.emit(board.render())
-        if getattr(args, "verbose", 0):
-            tried = board.render_bookkeeping()
-            if tried:
-                runtime.emit("")
-                runtime.emit(tried)
-        points = board.render_findings()
-        if points:
-            runtime.emit("")
-            runtime.emit(points)
+        emit_summary(runtime, board, args)
         close_board(args, board, request)
         close_filters(args, context.bypass, request)

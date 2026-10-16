@@ -125,9 +125,10 @@ def add_engine_flags(parser: argparse.ArgumentParser) -> None:
     engine.add_argument(
         "--batch",
         action="store_true",
-        help="never ask, take the default answer everywhere. Nothing prompts today, so this changes "
-        "nothing yet - it is here because whether to ask is one decision for every class, not a "
-        "decision each class makes for itself",
+        help="never ask, take the default answer everywhere. Nothing prompts today, so this "
+        "changes nothing yet: it is accepted so that a command line written for the "
+        "convention runs unchanged, and it is declared here rather than per class because "
+        "whether to ask is one decision for the whole tool",
     )
     engine.add_argument("-v", "--verbose", action="count", default=0, help="-v shows traffic, -vv shows tracebacks")
     engine.add_argument("-q", "--quiet", action="store_true", help="print results only")

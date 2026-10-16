@@ -33,10 +33,19 @@ class Action:
     # Generation ladder this action uses, if any. Recorded so a bypassed target
     # can resume at the generation that already worked.
     ladder: str = ""
+    # A config key naming something the operator asked for by hand. The session
+    # remembers that an action was tried on a page, which is the right thing to
+    # skip - but "a file was read here once" is not an answer to "-read that
+    # file", and a run that skips it because it once succeeded has nothing to
+    # show. When the named key is set, the cached verdict does not apply.
+    wanted: str = ""
 
     def __post_init__(self) -> None:
         if not self.ladder:
             self.ladder = self.id
+
+    def is_wanted(self, config) -> bool:
+        return bool(self.wanted) and bool(config.get(self.wanted))
 
 
 @dataclass
@@ -122,6 +131,21 @@ class RunContext:
         # Whether the last response looked like a refusal, which is the signal
         # to climb the mutation ladder rather than repeat a spelling.
         self.last_refused = False
+        # Progress lines a run should make once and not once per way it finds
+        # the same thing. Several wrappers reaching one file is one result, not
+        # eleven, and the reader is looking for the result.
+        self._announced: set[str] = set()
+
+    def announce(self, key: str, message: str) -> bool:
+        """Say something about a key the first time, and stay quiet after.
+
+        Returns whether it was said, so a caller can put other work behind it.
+        """
+        if key in self._announced:
+            return False
+        self._announced.add(key)
+        self.emit(message)
+        return True
 
     # ---------------------------------------------------------------- control
 
@@ -217,7 +241,7 @@ class Engine:
                     self.ctx.log(f"   already ruled out: {action.description}")
                     continue
                 done = f"ran.{action.id}"
-                if self.ctx.blackboard.has(done):
+                if self.ctx.blackboard.has(done) and not action.is_wanted(self.ctx.config):
                     self.ctx.info(f"skipping {action.description}: already tried on this page")
                     continue
                 self.ctx.info(f"testing {action.description}")

@@ -27,6 +27,29 @@ class Confidence(str, Enum):
     INCONCLUSIVE = "inconclusive"
 
 
+# Facts whose key starts with this hold a file a run read, and the value is what
+# came back. A read is a result rather than bookkeeping, so it is rendered with
+# the findings and at the end - the operator named a file, and the file is the
+# answer. The prefix is the contract between a module that reads and the summary
+# that shows: the module decides what is worth reading, the board decides how a
+# result is presented.
+READ_FACT_PREFIX = "read.file."
+
+# How much of a file to print. A read that fills the screen tells the reader
+# nothing they can act on, and the whole of it is in the session file.
+READ_LINES = 40
+
+# Facts whose key is a command and whose value is what it printed. Same reasoning
+# as a file that was read: the operator asked for a command to run and the output
+# is the answer, so it belongs with the results and not among the progress lines
+# it happened to scroll past. Keyed by the command, so running the same one twice
+# shows it once.
+RUN_FACT_PREFIX = "run.command."
+
+# How much of a command's output to print.
+RUN_LINES = 40
+
+
 @dataclass
 class Fact:
     """One thing learned about a target."""
@@ -222,7 +245,9 @@ class Blackboard:
         nothing they can use.
         """
         found = self.findings()
-        if not found:
+        reads = self.reads()
+        runs = self.runs()
+        if not found and not reads and not runs:
             return ""
         lines = ["---"]
         for item in found:
@@ -238,7 +263,71 @@ class Blackboard:
                 lines.append(f"    Evidence: {item['evidence']}")
             lines.append("")
         lines.append("---")
+        if reads:
+            lines.append("")
+            lines.append("Files read:")
+            for path, content in reads:
+                lines.append(f"    {path}")
+                for line in content.splitlines()[:READ_LINES]:
+                    lines.append(f"      {line}")
+                extra = len(content.splitlines()) - READ_LINES
+                if extra > 0:
+                    lines.append(f"      ... {extra} more line(s)")
+        if runs:
+            lines.append("")
+            lines.append("Commands run:")
+            for command, output in runs:
+                lines.append(f"    {command}")
+                body = output.splitlines()
+                if not body:
+                    lines.append("      (no output)")
+                    continue
+                for line in body[:RUN_LINES]:
+                    lines.append(f"      {line}")
+                extra = len(body) - RUN_LINES
+                if extra > 0:
+                    lines.append(f"      ... {extra} more line(s)")
         return "\n".join(lines)
+
+    def reads(self) -> list[tuple[str, str]]:
+        """The files a run actually read, in the order they were first read.
+
+        A file that was read is a result, not bookkeeping: the operator named it,
+        and the content is the whole answer. It is shown once, at the end, even
+        when several wrappers turned out to reach it - which one worked is in the
+        findings above, and saying the same file four times buries the one thing
+        that was asked for.
+        """
+        out: list[tuple[str, str]] = []
+        for key, fact in self.facts.items():
+            if not key.startswith(READ_FACT_PREFIX):
+                continue
+            path = key[len(READ_FACT_PREFIX) :]
+            if isinstance(fact.value, str) and fact.value:
+                out.append((path, fact.value))
+        return sorted(out)
+
+    def runs(self) -> list[tuple[str, str]]:
+        """The commands a run executed, and what each printed."""
+        out: list[tuple[str, str]] = []
+        for key, fact in self.facts.items():
+            if not key.startswith(RUN_FACT_PREFIX):
+                continue
+            command = key[len(RUN_FACT_PREFIX) :]
+            output = fact.value if isinstance(fact.value, str) else ""
+            out.append((command, output))
+        return sorted(out)
+
+    def remember_run(self, command: str, output: str) -> None:
+        """Keep what a command printed, so the summary can show it."""
+        if not command:
+            return
+        self.set(
+            RUN_FACT_PREFIX + command,
+            output,
+            evidence="the output of a command run through the target",
+            confidence=Confidence.CONFIRMED,
+        )
 
     def _readable_payload(self, payload: str) -> str:
         """The payload if it can be read, and a description of it if it cannot."""
@@ -255,10 +344,21 @@ class Blackboard:
     # has been tried" is what saves the next run the work, and it belongs in the
     # session file - not in the summary, where it reads as a result and buries
     # the one line that is one.
-    BOOKKEEPING = ("ran.",)
+    #
+    # The filter and bypass facts are here for the same reason: `bypass.floor.…`
+    # and `filter.refused.…` are counts about the tool's own state, and on a
+    # filtered target there are more of them than findings - printed as `[+]`,
+    # directly above the finding somebody is looking for.
+    BOOKKEEPING = ("ran.", "bypass.", "filter.")
+
+    # Facts that are results, but are shown somewhere better. A file that was
+    # read has a section of its own at the end; in the fact list it would appear
+    # as a Python literal of the whole file, directly above the line saying it
+    # was read.
+    SHOWN_ELSEWHERE = (READ_FACT_PREFIX, RUN_FACT_PREFIX)
 
     def is_bookkeeping(self, key: str) -> bool:
-        return key.startswith(self.BOOKKEEPING)
+        return key.startswith(self.BOOKKEEPING + self.SHOWN_ELSEWHERE)
 
     def render(self) -> str:
         """Human-readable summary, printed at the end of a run.

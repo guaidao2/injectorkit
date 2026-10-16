@@ -22,6 +22,7 @@ from ...engine.runner import (
     close_board,
     close_filters,
     collect_targets,
+    emit_summary,
     open_board,
     open_filters,
     run_targets,
@@ -58,14 +59,21 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     exploit.add_argument(
         "--exploit",
         action="store_true",
-        help="act on the services that were fingerprinted: write a file through Redis (needs "
-        "--webroot), or run a command through PHP-FPM (needs --fpm-script). Each chain first "
-        "asks the service whether it will allow it, so a hardened target is reported as such",
+        help="act on the target: write a file through Redis (needs --webroot), or run a "
+        "command through PHP-FPM (needs --fpm-script). Each chain first asks the service "
+        "whether it will allow it, so a hardened target is reported as such",
     )
     exploit.add_argument("--webroot", metavar="DIR", help="a web-accessible directory on the target, for the Redis chain")
     exploit.add_argument("--shell-name", metavar="FILE", help="filename to write the shell as")
     exploit.add_argument("--fpm-script", metavar="PATH", help="a PHP file that exists on the target, for the PHP-FPM chain")
     exploit.add_argument("--fpm-port", type=int, default=9000, help="PHP-FPM port (default: 9000)")
+    exploit.add_argument(
+        "--os-cmd",
+        metavar="COMMAND",
+        help="a command to run once execution is established. Needs --exploit. A chain that "
+        "is written rather than executed runs this instead of the `id` it uses to prove "
+        "itself, and prints what came back",
+    )
 
     parser.add_argument(
         "--rebind",
@@ -128,6 +136,7 @@ def run_one(request: Request, params: list[Param], args: argparse.Namespace, run
             "shell_name": args.shell_name,
             "fpm_script": args.fpm_script,
             "fpm_port": args.fpm_port,
+            "os_cmd": args.os_cmd or "",
             "rebind": _rebind_name(args.rebind),
         },
         log=runtime.log,
@@ -143,16 +152,6 @@ def run_one(request: Request, params: list[Param], args: argparse.Namespace, run
         # Ctrl+C is exactly what a resumed run needs, and dropping it means the
         # next attempt pays for all of it again - while the priors, which are
         # cheap to recompute, were being saved all along.
-        runtime.emit("")
-        runtime.emit(blackboard.render())
-        if getattr(args, "verbose", 0):
-            tried = blackboard.render_bookkeeping()
-            if tried:
-                runtime.emit("")
-                runtime.emit(tried)
-        points = blackboard.render_findings()
-        if points:
-            runtime.emit("")
-            runtime.emit(points)
+        emit_summary(runtime, blackboard, args)
         close_board(args, blackboard, request)
         close_filters(args, context.bypass, request)

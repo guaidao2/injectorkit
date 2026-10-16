@@ -252,5 +252,74 @@ class WhichFileToAskFor(unittest.TestCase):
         self.assertEqual(_targets_for(self._wrapper("php://x/{file}", ("<?php",)), []), [])
 
 
+class RememberedAnswers(unittest.TestCase):
+    """What is kept is the answer, not the fact that the question was asked.
+
+    The session remembers that the read action ran on a page, and that is the
+    right thing to skip - but "a file was read here once" is not the file, and a
+    second run that skipped the action had the payload to show and nothing else.
+    Keeping the answer instead means a later run re-asks and gets it back without
+    spending a request.
+    """
+
+    def _ctx(self):
+        from types import SimpleNamespace
+
+        from injectorkit.engine.blackboard import Blackboard
+
+        return SimpleNamespace(blackboard=Blackboard())
+
+    def test_an_answer_is_kept_and_recalled(self):
+        from injectorkit.modules.proto.graph import _remember_read, _remembered_read
+
+        ctx = self._ctx()
+        _remember_read(ctx, "/etc/passwd", "root:x:0:0:root:/root\n")
+        self.assertEqual(_remembered_read(ctx, "/etc/passwd"), "root:x:0:0:root:/root\n")
+
+    def test_a_file_never_read_is_not_remembered(self):
+        from injectorkit.modules.proto.graph import _remembered_read
+
+        self.assertEqual(_remembered_read(self._ctx(), "/etc/passwd"), "")
+
+    def test_an_empty_answer_is_not_an_answer(self):
+        from injectorkit.modules.proto.graph import _remember_read, _remembered_read
+
+        ctx = self._ctx()
+        _remember_read(ctx, "/etc/passwd", "")
+        self.assertEqual(_remembered_read(ctx, "/etc/passwd"), "")
+
+    def test_a_nameless_path_is_never_remembered(self):
+        from injectorkit.modules.proto.graph import _remember_read, _remembered_read
+
+        ctx = self._ctx()
+        _remember_read(ctx, "", "root:x:0:0\n")
+        self.assertEqual(_remembered_read(ctx, ""), "")
+
+    def test_two_files_are_remembered_separately(self):
+        from injectorkit.modules.proto.graph import _remember_read, _remembered_read
+
+        ctx = self._ctx()
+        _remember_read(ctx, "/etc/passwd", "passwd\n")
+        _remember_read(ctx, "/flag", "flag{one}\n")
+        self.assertEqual(_remembered_read(ctx, "/etc/passwd"), "passwd\n")
+        self.assertEqual(_remembered_read(ctx, "/flag"), "flag{one}\n")
+
+    def test_the_read_action_is_one_the_operator_can_ask_for_by_name(self):
+        from injectorkit.modules.proto.graph import build_graph
+
+        actions = build_graph().state("probe").actions
+        read = next(item for item in actions if item.id == "probe.read")
+        self.assertEqual(read.wanted, "read")
+        self.assertTrue(read.is_wanted({"read": ["/etc/passwd"]}))
+
+    def test_the_other_actions_are_still_skipped_on_a_warm_session(self):
+        from injectorkit.modules.proto.graph import build_graph
+
+        for item in build_graph().state("probe").actions:
+            if item.id == "probe.read":
+                continue
+            self.assertEqual(item.wanted, "", item.id)
+
+
 if __name__ == "__main__":
     unittest.main()
