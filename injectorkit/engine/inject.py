@@ -18,14 +18,39 @@ from __future__ import annotations
 
 import ipaddress
 import re
+from typing import Callable
 
 from ..core.httpmsg import Request
-from ..core.mutate import Kind, Variant
+from ..core.mutate import Kind, Variant, applicable
 from ..core.params import Encode, Param, Where, pollute, rewrite
 from ..core.protocols import with_host
 from .blackboard import Confidence
 
 VIA_PLACEHOLDER = "{target}"
+
+# The most variants one generation may spend on one seed.
+#
+# The budget is derived from the catalogue rather than fixed, because a fixed
+# number starves whatever sits past it: every applicable rewrite has to reach the
+# wire at least once, and two of the classes already have more rewrites than the
+# constant that used to be here, so the ones ranked last were never sent at all.
+#
+# The ceiling is what stops a catalogue that keeps growing from turning one
+# parameter into a flood. It is a backstop, not a target: when the catalogue
+# reaches it the two rules genuinely conflict, and the way to find out is a test
+# that fails rather than a rewrite that quietly stops being sent. See
+# `tests/test_mutate.py`, which asserts the catalogue stays under this.
+GENERATION_CEILING = 48
+
+
+def generation_budget(kind: Kind, exclude_families: frozenset[str], requested: int = 0) -> int:
+    """How many variants a generation may send.
+
+    The count of applicable rewrites is the floor, so none of them is dropped for
+    want of budget. `requested` raises it when a caller wants more. The ceiling
+    caps both, and a test guards that the catalogue has not reached it.
+    """
+    return min(GENERATION_CEILING, max(requested, len(applicable(kind, exclude_families))))
 
 
 def candidates(ctx) -> list[Param]:
@@ -81,8 +106,40 @@ def inject_escalating(
     max_generation: int = 3,
     per_generation: int = 12,
     allow_pollution: bool = True,
+    exclude_families: frozenset[str] = frozenset(),
+    until: Callable[[object], bool] | None = None,
+    abandon: Callable[[object], bool] | None = None,
+    scope: str = "",
 ):
-    """Send a seed, climbing one generation at a time only while refused."""
+    """Send a seed, climbing one generation at a time only while refused.
+
+    `exclude_families` is for rewrites the thing being targeted cannot run at
+    all - a spelling only one shell dialect accepts, say. They are dropped before
+    the ladder is built, because a rewrite that cannot work is not a bypass that
+    failed, and spending requests on it teaches the priors something false.
+
+    `until` is for the case where getting past the filter is not the answer.
+    Somewhere the question is "did the value reach a parser", and a rewrite that
+    is accepted has answered it. Elsewhere acceptance means only that nothing
+    objected, and the payload still has to do something - a command has to run,
+    a value has to come back changed. Supplying `until` keeps the climb going
+    until that happens, rather than stopping at the first request nobody
+    refused.
+
+    `abandon` is the other half of that. A target that takes fifteen seconds over
+    a payload it did not run - because the value reached a command as an argument
+    and the command is waiting on a name it cannot resolve - will take fifteen
+    seconds over the next forty rewrites of it too, and the answer will be the
+    same. Leaving the seed unclimbed is not giving up on the target; the other
+    seeds are still tried. Nothing is rewarded and no floor is raised for a seed
+    abandoned this way, because nothing was learned about the filter.
+
+    `scope` names the family a rewrite verdict belongs to, for a caller whose
+    payloads do not carry a scheme to derive one from. What was learned about a
+    spelling is worth carrying to the next target of the same kind and not to a
+    different kind, so a module that knows what its own payload families are
+    supplies the name.
+    """
     host = template(ctx).host()
     start = ctx.bypass.floor(host, action)
     # What a refused rewrite proves, and what it does not. A blocklist matches
@@ -92,8 +149,9 @@ def inject_escalating(
     # (scheme, and whether the host is an address or a name), and a rewrite that
     # failed there is not tried again for the next payload in the same family -
     # that is where a scan turns into noise.
-    scope = payload_scope(seed)
+    scope = scope or payload_scope(seed)
     last = None
+    budget = generation_budget(kind, exclude_families, per_generation)
 
     # Before any rewrite, one attempt that is not a rewrite: the same parameter
     # sent a second time, original value first and payload last. A filter reading
@@ -108,14 +166,32 @@ def inject_escalating(
         if not ctx.last_refused:
             if ctx.pheromone is not None:
                 ctx.pheromone.reward(scope, ("pollute",), amount=0.5)
-            return last
-        if ctx.pheromone is not None:
+            # Getting through is the answer only when getting through is the
+            # question. Where the caller wants an effect, the ladder still has to
+            # run - returning here is how a module ends up sending the pollution
+            # request and nothing else, and reporting the result of a probe it
+            # never made.
+            if until is None or until(exchange):
+                return last
+            if abandon is not None and abandon(exchange):
+                # The target sat on the polluted value, so it will sit on the
+                # seed too: the same payload is the last one either way.
+                ctx.log(f"   {action}: the polluted value took {exchange.response.elapsed:.1f}s; "
+                        "leaving this seed unclimbed")
+                return last
+        elif ctx.pheromone is not None:
             ctx.pheromone.punish(scope, ("pollute",))
 
     for generation in range(start, max_generation + 1):
         pool = [
             variant
-            for variant in ctx.variants(seed, generation=generation, kind=kind, limit=400)
+            for variant in ctx.variants(
+                seed,
+                generation=generation,
+                kind=kind,
+                limit=400,
+                exclude_families=exclude_families,
+            )
             if variant.generation == generation
         ]
         # What is likely to get through goes first. This is a prior, not a
@@ -125,7 +201,7 @@ def inject_escalating(
 
         attempted = 0
         for variant in pool:
-            if ctx.stopped or attempted >= per_generation:
+            if ctx.stopped or attempted >= budget:
                 break
             if any(ctx.bypass.mutator_dead(host, action, name, scope) for name in variant.mutators):
                 continue
@@ -151,15 +227,29 @@ def inject_escalating(
                 ctx.log(f"   {action}: {variant.describe()} was refused")
                 continue
 
-            if ctx.pheromone is not None:
-                # Clearing the filter is worth something, but not much: whether
-                # the value reached a parser is only answerable from the
-                # response, and the caller scores that when it finds evidence.
-                ctx.pheromone.reward(scope, variant.mutators, amount=0.25)
-            if generation > start:
-                ctx.bypass.raise_floor(host, action, generation)
-                ctx.log(f"   {action}: generation {generation} reached the target, floor raised")
-            return last
+            answered = until is None or until(exchange)
+            if answered:
+                if ctx.pheromone is not None:
+                    # Clearing the filter is worth something, but not much:
+                    # whether the value reached a parser is only answerable from
+                    # the response, and the caller scores that when it finds
+                    # evidence.
+                    ctx.pheromone.reward(scope, variant.mutators, amount=0.25)
+                if generation > start:
+                    ctx.bypass.raise_floor(host, action, generation)
+                    ctx.log(f"   {action}: generation {generation} reached the target, floor raised")
+                return last
+            # Accepted, but the caller's question is not answered yet. Nothing is
+            # rewarded and no floor is raised: this rewrite got past the filter
+            # and did nothing, and a floor raised on that would make every later
+            # attempt start above its own seed.
+            if abandon is not None and abandon(exchange):
+                ctx.log(
+                    f"   {action}: {variant.describe()} took {exchange.response.elapsed:.1f}s "
+                    "without the effect; leaving this seed unclimbed"
+                )
+                return last
+            ctx.log(f"   {action}: {variant.describe()} reached the target without the effect")
     return last
 
 

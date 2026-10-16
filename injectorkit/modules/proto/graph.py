@@ -84,26 +84,52 @@ def _file_targets(ctx: RunContext) -> list[str]:
 def _targets_for(wrapper: Wrapper, targets: list[str]) -> list[str]:
     """Which paths to ask this wrapper for.
 
-    A file the application serves is the right first question for a PHP filter,
-    and the wrong one for a Java file reader, which cannot see the web root at
-    all. One target per wrapper keeps the request count honest.
+    A wrapper that reads through a scheme can be asked for a file the
+    application serves and for one the system owns, and the two answer different
+    questions: reading the application's own page proves the wrapper resolves,
+    reading the password file proves it reaches outside. Asking only one of them
+    leaves half the wrapper's own signature list unable to fire, and a signature
+    that can never match is a probe that can never succeed however well the
+    target behaves.
 
-    An absolute path goes first for a wrapper that takes a plain path, because a
-    relative name is a guess about the working directory that a container is
-    free to place somewhere else. A target that refuses every `://` spelling
-    leaves only this wrapper, so the one path it gets has to be the one most
-    likely to exist on any host.
+    Measured on a live target: `php://filter/convert.base64-encode` was asked for
+    `index.php` and nothing else. That answered with the base64 of an HTML page,
+    which matches none of the wrapper's signatures, while `cm9vdDp4` - the base64
+    of `root:x`, in that same list - describes a file that was never requested.
+    The read worked and the run reported no evidence.
+
+    So a scheme wrapper gets one path of each kind, most likely first. Which kind
+    comes first is its own signature list's business: a wrapper that names a
+    system file is asked for one first.
     """
     if not targets:
         return []
+    absolute = [t for t in targets if t.startswith("/")]
+    relative = [t for t in targets if not t.startswith("/")]
+
     if wrapper.family in _SYSTEM_FAMILIES:
-        system = [t for t in targets if t.startswith("/")]
-        return (system or targets)[:1]
+        return (absolute or targets)[:1]
     if "://" not in wrapper.payload:
-        absolute = [t for t in targets if t.startswith("/")]
         if absolute:
             return absolute[:1]
-    return targets[:1]
+        return targets[:1]
+
+    order = (absolute, relative) if _names_a_system_file(wrapper) else (relative, absolute)
+    picked: list[str] = []
+    for group in order:
+        if group and group[0] not in picked:
+            picked.append(group[0])
+    return picked or targets[:1]
+
+
+# Markers that describe a file the system owns rather than one the application
+# serves. They are how a wrapper says which of the two questions it expects its
+# answer from.
+_SYSTEM_MARKERS = ("root:x:0:0", "root:.*:0:0", "passwd", "win.ini", "boot.ini")
+
+
+def _names_a_system_file(wrapper: Wrapper) -> bool:
+    return any(marker in signature for signature in wrapper.signatures for marker in _SYSTEM_MARKERS)
 
 
 def _runtime_of(wrapper: Wrapper) -> str:
@@ -198,6 +224,31 @@ def _path_of(payload: str) -> str:
     return ""
 
 
+def _named_file_contents(wrapper: Wrapper, body: str, payload: str) -> str:
+    """The file itself, out of the page that carried it.
+
+    A read that is proved and not shown is half a result: the operator asked for
+    a file and the tool answers that it could be read. The views are the same
+    ones the verdict was based on, so what is printed is what the finding rests
+    on rather than a second, differently-decoded copy of the response.
+
+    Only for a file the operator named. The probe's own reads are about whether a
+    wrapper works, and printing the application's page at whoever ran it is noise.
+    """
+    cleaned = Judge.strip_payload(body.encode("latin-1", "replace"), payload)
+    raw = cleaned.decode("latin-1", "replace")
+    views = [v for v in Judge.decoded_views(cleaned) if len(v) > 8 and "<html" not in v.lower()]
+    # A view that does not appear in the response is one that had to be decoded
+    # to exist, which is the file rather than the page carrying it. The raw text
+    # is a view too, and it is the one that holds the base64 - so preferring the
+    # first view prints the encoding instead of what was encoded.
+    decoded = [v for v in views if v not in raw]
+    if decoded:
+        return max(decoded, key=len)
+    plain = [v for v in views if "<" not in v]
+    return max(plain, key=len) if plain else ""
+
+
 def _proven(
     ctx: RunContext,
     wrapper: Wrapper,
@@ -222,6 +273,14 @@ def _proven(
     }
     _note_finding(ctx, entry)
     _record(ctx, WRAPPERS, wrapper.name, evidence=note or verdict.reason, confidence=Confidence.CONFIRMED)
+
+    # A file the operator named is what they asked for, so they get to see it.
+    if ctx.config.get("read") and body:
+        shown = _named_file_contents(wrapper, body, variant.value)
+        if shown:
+            ctx.emit(f"  [+] {_path_of(variant.value) or variant.value}:")
+            for line in shown.splitlines()[:40]:
+                ctx.emit(f"      {line}")
 
     # A file that was read says where files live, and whoever writes one next
     # needs that. Only reads count: a `data://` payload has no path in it, and

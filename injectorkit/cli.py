@@ -15,18 +15,28 @@ import sys
 from . import __version__
 from .engine import style
 from .logo import banner
-from .modules import proto, ssrf
-from .runtime import build_runtime
+from .modules import cmdi, proto, ssrf
+from .runtime import build_runtime, make_output_safe
 
 MODULES = {
     ssrf.NAME: ssrf,
     proto.NAME: proto,
+    cmdi.NAME: cmdi,
 }
 
 
 def add_engine_flags(parser: argparse.ArgumentParser) -> None:
     group = parser.add_argument_group("request")
-    group.add_argument("-X", "--method", default="GET", help="HTTP method for the target request")
+    group.add_argument(
+        "-X",
+        "--method",
+        # Not defaulted to GET, because "the operator asked for GET" and "the
+        # operator did not say" are different: with a body, the second means
+        # POST, and a default of GET erases the difference before anything can
+        # act on it.
+        default=None,
+        help="HTTP method for the target request (default: POST with --data, else GET)",
+    )
     group.add_argument(
         "-H",
         "--header",
@@ -199,6 +209,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Before anything can print: a target's bytes must not be able to end the
+    # run. Response bodies are decoded so that no byte is lost, and a console
+    # whose code page cannot show them raises on print - which is how a run dies
+    # while printing the answer it just went and got.
+    make_output_safe()
     parser = build_parser()
     args = parser.parse_args(argv)
     if not getattr(args, "command", None):

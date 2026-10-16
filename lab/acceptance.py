@@ -34,6 +34,12 @@ import urllib.parse
 import urllib.request
 
 HOST = os.environ.get("IK_LAB", "192.168.44.149")
+# The PowerShell endpoint is served separately, because Apache cannot start the
+# .NET runtime - see the note in `setup.sh`. The shell is real either way.
+PS_PORT = int(os.environ.get("IK_PS_PORT", "8086"))
+# The Windows endpoint lives on the host, not the lab, and only runs when the
+# operator started it - see `lab/cmdwin.py`. Absent means skip.
+CMD_PORT = int(os.environ.get("IK_CMD_PORT", "8087"))
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PY = sys.executable
 LAB = f"http://{HOST}:8080"
@@ -55,6 +61,11 @@ class Result:
         # scenario is about - so a scenario whose whole point is one kind of
         # evidence has to name that evidence.
         self.must = must
+        # Set when the correct result is *nothing*: the scenario passes if the
+        # line naming that is present and the run claimed no finding. Written as
+        # a field rather than by inverting the answer afterwards, so the two
+        # sides are compared on the same question instead of on opposite ones.
+        self.expect_absent = ""
         self.hand: bool | None = None
         self.hand_note = ""
         self.tool = False
@@ -192,6 +203,12 @@ SCENARIOS: list[tuple[str, str, str]] = [
     ("deserialize", "phar-gadget", "a gadget deserialized from an uploaded archive"),
     ("deserialize", "unserialize-gadget", "a gadget deserialized from a value in the request"),
     ("deserialize", "session-file", "the session file reached through an include"),
+    ("cmdi", "whole-command", "a parameter that is the command"),
+    ("cmdi", "embedded-argument", "a parameter appended to a command the page runs"),
+    ("cmdi", "escaped-control", "the same value escaped, which must not report"),
+    ("cmdi", "behind-waf", "command injection through the request-side filter"),
+    ("cmdi", "powershell", "a parameter that is handed to a different shell"),
+    ("cmdi", "windows-cmd", "the same question asked of the Windows interpreter"),
     ("ssrf", "internal-service", "an internal service only the application can reach"),
     ("ssrf", "metadata", "the cloud metadata address"),
     ("ssrf", "address-spelling", "a spelling the signature filter does not know"),
@@ -729,6 +746,145 @@ def scenario_deserialize(name: str) -> Result:
     return result
 
 
+def hand_cmdi(base: str, param: str) -> tuple[bool, str]:
+    """Ask the endpoint to compute something, the way a person would.
+
+    The question is arithmetic: two markers with a computed number between them.
+    A page that reflects the payload returns the expression, so looking for the
+    number is what separates "it ran" from "it came back".
+
+    Delivered two ways, because where the value lands decides which is needed: a
+    parameter that is the command needs nothing, and one appended to a command
+    the page already runs has to end that command first.
+    """
+    left = secrets.randbelow(9000) + 1000
+    right = secrets.randbelow(9000) + 1000
+    answer = str(left + right)
+    opened = "ikopen" + secrets.token_hex(4)
+    closed = "ikclose" + secrets.token_hex(4)
+
+    for prefix in ("", "; "):
+        payload = f"{prefix}echo {opened}; echo $(({left}+{right})); echo {closed}"
+        _, body = fetch(f"{base}?{param}={urllib.parse.quote(payload, safe='')}")
+        # The page prints the command it is about to run, so the payload's own
+        # markers appear in the response whether or not anything ran. A person
+        # reads the *output*, which is the last place the markers appear - the
+        # first pair is the page quoting the request back.
+        if body.count(opened) >= 2 and body.count(closed) >= 2:
+            between = body.rsplit(opened, 1)[1].split(closed, 1)[0].strip()
+            if between == answer:
+                return True, f"the shell computed {answer} between the markers"
+    return False, "no delivery produced the computed number"
+
+
+def hand_powershell() -> tuple[bool, str]:
+    """Ask the PowerShell endpoint to compute something, the way a person would.
+
+    A different language, not a differently-named one: the proof has to be said
+    in the shell that is actually there. This one prints with `Write-Output` and
+    computes in parentheses, and the same question written for a POSIX shell is
+    not the same question here.
+    """
+    left = secrets.randbelow(9000) + 1000
+    right = secrets.randbelow(9000) + 1000
+    answer = str(left + right)
+    opened = "ikopen" + secrets.token_hex(4)
+    closed = "ikclose" + secrets.token_hex(4)
+
+    payload = (
+        f"Write-Output {opened}; Write-Output ({left}+{right}); Write-Output {closed}"
+    )
+    _, body = fetch(
+        f"http://{HOST}:{PS_PORT}/cmdi.php?ps={urllib.parse.quote(payload, safe='')}"
+    )
+    # The page prints the command it is about to run, so the payload's markers
+    # appear whether or not anything ran. The output is where they appear last.
+    if body.count(opened) >= 2 and body.count(closed) >= 2:
+        between = body.rsplit(opened, 1)[1].split(closed, 1)[0].strip()
+        if between == answer:
+            return True, f"PowerShell computed {answer} between the markers"
+    return False, f"the endpoint answered {body.strip()[:80]!r}"
+
+
+def hand_cmd_win() -> tuple[bool, str]:
+    """Ask the Windows interpreter to compute something, the way a person would.
+
+    `set /a` prints the result itself and prints it without a newline, so the
+    markers and the sum run together - `echo A & set /a 2+3 & echo B` answers
+    `A \\r\\n5B`. Strip is what makes the two comparable; nothing else about the
+    arithmetic differs from the other dialects.
+    """
+    left = secrets.randbelow(9000) + 1000
+    right = secrets.randbelow(9000) + 1000
+    answer = str(left + right)
+    opened = "ikopen" + secrets.token_hex(4)
+    closed = "ikclose" + secrets.token_hex(4)
+
+    payload = f"echo {opened} & set /a {left}+{right} & echo {closed}"
+    _, body = fetch(
+        f"http://127.0.0.1:{CMD_PORT}/cmd?cmd={urllib.parse.quote(payload, safe='')}"
+    )
+    if body.count(opened) >= 2 and body.count(closed) >= 2:
+        between = body.rsplit(opened, 1)[1].split(closed, 1)[0].strip()
+        if between == answer:
+            return True, f"the interpreter computed {answer} between the markers"
+    return False, f"the endpoint answered {body.strip()[:80]!r}"
+
+
+def scenario_cmdi(name: str) -> Result:
+    """Command injection, in each shape the endpoint offers."""
+    if name == "windows-cmd":
+        # This one runs on the host, and the host endpoint runs commands as the
+        # operator. It is not started by this runner - it starts only when the
+        # operator asks it to - so an unstarted endpoint is a skip, not a pass.
+        url = f"http://127.0.0.1:{CMD_PORT}/cmd?cmd=ver"
+        result = Result(name, url, ["cmdi", "-u", url, "--flush-session"])
+        result.hand, result.hand_note = hand_cmd_win()
+        result.must = r"^\s*\[\+\] result: the parameter runs commands"
+        return result
+
+    if name == "powershell":
+        url = f"http://{HOST}:{PS_PORT}/cmdi.php?ps=calc"
+        result = Result(name, url, ["cmdi", "-u", url, "--flush-session"])
+        result.hand, result.hand_note = hand_powershell()
+        result.must = r"^\s*\[\+\] result: the parameter runs commands"
+        return result
+
+    port = 8090 if name == "behind-waf" else 8080
+    param = {"whole-command": "cmd", "embedded-argument": "host", "escaped-control": "safe"}.get(
+        name, "host"
+    )
+    base = f"http://{HOST}:{port}/cmdi.php"
+    url = f"{base}?{param}=127.0.0.1"
+    result = Result(name, url, ["cmdi", "-u", url, "--flush-session"])
+    result.hand, result.hand_note = hand_cmdi(base, param)
+
+    # Two of the four shapes are checking that nothing is reported, and the tool
+    # has to say so in its own words. `expect_absent` is how a scenario states
+    # that: the run passes when the line is there and no finding is. Each one
+    # names the *reason* as well, because "nothing ran" is two different findings
+    # and a run that reported the wrong one would mean the four answers are not
+    # being kept apart.
+    if name == "escaped-control":
+        result.expect_absent = (
+            r"^\[\-\] result: no command execution was established - no dialect and delivery"
+        )
+        result.must = r"^\s*\[\!\] command execution"
+        result.args += ["--max-requests", "60"]
+    elif name == "behind-waf":
+        result.expect_absent = (
+            r"^\[\-\] result: no command execution was established - nothing got past the filter"
+        )
+        result.must = r"^\s*\[\!\] command execution"
+        # Nothing proves, so the ladder runs to the end of whatever budget it
+        # has. The default is three hundred requests for an answer that is
+        # already settled, and the scenario only needs the verdict.
+        result.args += ["--max-requests", "60"]
+    else:
+        result.must = r"^\s*\[\+\] result: the parameter runs commands"
+    return result
+
+
 def build(group: str, name: str) -> Result:
     if group == "lfi":
         return scenario_lfi(name)
@@ -736,6 +892,8 @@ def build(group: str, name: str) -> Result:
         return scenario_shell(name)
     if group == "deserialize":
         return scenario_deserialize(name)
+    if group == "cmdi":
+        return scenario_cmdi(name)
     if group == "ssrf":
         return scenario_ssrf(name)
     return scenario_waf(name)
@@ -810,6 +968,14 @@ def main() -> int:
             result.tool = tool_found(output)
             if result.must:
                 result.tool = bool(re.search(result.must, output, re.M))
+            if result.expect_absent:
+                # Both sides are answering one question - was execution found -
+                # so the run passes by answering no, in its own words. Claiming a
+                # finding is a failure, and so is saying nothing at all: a run
+                # that never reached a verdict has not given the negative.
+                claimed = bool(re.search(result.must, output, re.M))
+                said_no = bool(re.search(result.expect_absent, output, re.M))
+                result.tool = claimed or not said_no
             result.tool_note = "found" if result.tool else f"nothing (exit {code})"
 
         results.append(result)

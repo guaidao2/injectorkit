@@ -150,8 +150,18 @@ _registered: list[Mutator] = []
 
 
 def register(*mutators: Mutator) -> None:
-    """Add mutators contributed by a module."""
-    _registered.extend(mutators)
+    """Add mutators contributed by a module.
+
+    Idempotent by name. A module registers when it is imported and a test that
+    imports it may register again, so the same rewrite can arrive twice - and a
+    catalogue holding two entries with one name is a rewrite that gets sent
+    twice, which is worse than it sounds once generations multiply it.
+    """
+    known = {item.name for item in all_mutators()}
+    fresh = [item for item in mutators if item.name not in known]
+    for item in fresh:
+        known.add(item.name)
+    _registered.extend(fresh)
 
 
 def all_mutators() -> tuple[Mutator, ...]:
@@ -185,11 +195,16 @@ def generations(
     kind: Kind = Kind.GENERIC,
     max_generation: int = 2,
     limit: int = 24,
+    exclude_families: frozenset[str] = frozenset(),
 ) -> list[Variant]:
     """Expand a seed into its variant ladder, deduplicated and bounded.
 
     Generation 0 is the seed itself, so an unprotected target costs one request
     per seed and never sees a mutation.
+
+    `exclude_families` drops whole families before anything is built - for
+    rewrites that the thing being targeted cannot run at all, where sending them
+    would be requests spent proving nothing rather than a bypass that failed.
     """
     out: list[Variant] = [Variant(value=seed, generation=0)]
     seen: set[str] = {seed}
@@ -201,7 +216,7 @@ def generations(
         value, generation, used, families, encoded = frontier.pop(0)
         if generation >= max_generation:
             continue
-        for mutator in applicable(kind, families):
+        for mutator in applicable(kind, families | exclude_families):
             # A variant already in transport form is sent as it stands; encoding
             # it again would make the target receive a literal percent sequence.
             if encoded and mutator.produces_encoded:

@@ -26,15 +26,21 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-# Directories that are the document root on an install nobody has reorganised.
+# Where each server's distribution package puts the document root.
+#
+# One entry per package, because that is where the list comes from: a stock
+# install of each of these is served from the path beside it, which is a fact
+# about the package rather than a guess about a target. Anything an install has
+# moved is answered by the server's own configuration, which is read before this
+# list is fallen back on.
 LINUX_ROOTS: tuple[str, ...] = (
-    "/var/www/html",
-    "/var/www",
-    "/usr/share/nginx/html",
-    "/srv/www/htdocs",
-    "/usr/local/apache2/htdocs",
-    "/var/www/nginx-default",
-    "/srv/www",
+    "/var/www/html",  # Apache and nginx, Debian and Ubuntu
+    "/var/www",  # the parent most of them sit under
+    "/usr/share/nginx/html",  # nginx, from its own package
+    "/srv/www/htdocs",  # Apache, SUSE packaging
+    "/usr/local/apache2/htdocs",  # Apache built from source
+    "/var/www/nginx-default",  # nginx, older Debian packaging
+    "/srv/www",  # the other parent
 )
 
 WINDOWS_ROOTS: tuple[str, ...] = (
@@ -43,8 +49,9 @@ WINDOWS_ROOTS: tuple[str, ...] = (
     "C:/Inetpub/wwwroot",
 )
 
-# Directory names that mark the point a web root begins. A path containing one of
-# these says what everything above it is; sqlmap splits on the same names.
+# Directory names that conventionally mark where a web root begins. A path
+# containing one of these says what everything above it is, which is how an
+# absolute path read off the target is turned into a guess about the root.
 ROOT_MARKERS: tuple[str, ...] = (
     "htdocs",
     "wwwroot",

@@ -61,7 +61,13 @@ def request_from_args(args, module: str) -> Request:
         raise SystemExit(f"{module} needs -u/--url (or -r for a raw request)")
     request = Request.from_url(
         args.url,
-        method=args.method or "GET",
+        # A body means a form post unless the operator says otherwise, which is
+        # what every other client does with `-d` and what the target expects. A
+        # GET carrying a body is read by almost nothing: PHP fills `$_POST` only
+        # for a POST, so the parameters are parsed out of the body by the tool and
+        # then never seen by the application - measured on a live target, where
+        # every probe answered with the page as though no parameter had been sent.
+        method=args.method or ("POST" if args.data else "GET"),
         headers=parse_headers(args.header),
         body=args.data,
     )

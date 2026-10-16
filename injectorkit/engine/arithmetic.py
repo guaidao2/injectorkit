@@ -9,8 +9,9 @@ contain - a number. The payload carries an addition; the response has to carry
 its result. Echoing the payload back returns `2+3`, not `5`, and only a shell
 that ran the arithmetic can produce the second one.
 
-This is the shape commix uses for the same problem, and it is stronger than a
-random marker for exactly that reason.
+The same question works for any interpreter that evaluates expressions, which is
+why it lives here rather than in one module: what differs between them is the
+syntax of the command, and that belongs to whoever knows the target's language.
 """
 
 from __future__ import annotations
@@ -52,14 +53,24 @@ class Arithmetic:
 
         Returns the text between the markers when it is the sum that was asked
         for, so a caller has something to show. None means the arithmetic did not
-        run: the markers are missing, or what sits between them is the expression
-        rather than its result.
+        run: no marker pair encloses the sum, because the markers are missing or
+        because what sits between them is the expression rather than its result.
+
+        Every pair is checked, not just the last. A page that prints the command
+        before running it puts the expression in the earlier pair and the result
+        in the later one; a page that prints it afterwards does the opposite, and
+        looking only at the last pair would report a target that ran the command
+        as one that did not. Which order a target echoes in is not something to
+        depend on, so neither order is assumed.
         """
-        start = body.rfind(self.open)
-        if start == -1:
-            return None
-        end = body.find(self.close, start + len(self.open))
-        if end == -1:
-            return None
-        between = body[start + len(self.open) : end].strip()
-        return between if between == self.answer else None
+        answer = self.answer
+        start = body.find(self.open)
+        while start != -1:
+            end = body.find(self.close, start + len(self.open))
+            if end == -1:
+                break
+            between = body[start + len(self.open) : end].strip()
+            if between == answer:
+                return between
+            start = body.find(self.open, start + len(self.open))
+        return None

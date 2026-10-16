@@ -126,5 +126,35 @@ class Summary(unittest.TestCase):
         self.assertIn("2", board.summarise())
 
 
+class WhatTheFilterIsCalled(unittest.TestCase):
+    """The family a rewrite verdict belongs to, for the cross-target priors."""
+
+    def _bypass(self):
+        from injectorkit.engine.blackboard import Blackboard
+        from injectorkit.engine.bypass import Bypass
+
+        return Bypass(Blackboard())
+
+    def test_a_target_with_no_filter_is_its_own_kind(self):
+        # Not "unknown": a spelling that failed where nothing was filtering says
+        # nothing about a target that is, and grouping them would spread the
+        # wrong lesson.
+        self.assertEqual(self._bypass().filter_class("t"), "unfiltered")
+
+    def test_a_named_product_is_the_class(self):
+        from injectorkit.engine.bypass import RefusalSignature
+
+        bypass = self._bypass()
+        bypass.record_probe("t", "Cloudflare", RefusalSignature())
+        self.assertEqual(bypass.filter_class("t"), "cloudflare")
+
+    def test_a_refusal_shape_without_a_name_still_separates(self):
+        from injectorkit.engine.bypass import RefusalSignature
+
+        bypass = self._bypass()
+        bypass.record_probe("t", "", RefusalSignature(statuses=[403]))
+        self.assertEqual(bypass.filter_class("t"), "filtered-403")
+
+
 if __name__ == "__main__":
     unittest.main()

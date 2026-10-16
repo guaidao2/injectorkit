@@ -155,12 +155,33 @@ class RunContext:
                 self.log(f"  refused by {host}; raising filter pressure")
         return exchange
 
-    def variants(self, seed: str, generation: int = 0, kind: Any = None, limit: int = 12) -> list[Any]:
-        """Expand a seed into variants at or past a generation."""
+    def variants(
+        self,
+        seed: str,
+        generation: int = 0,
+        kind: Any = None,
+        limit: int = 12,
+        exclude_families: frozenset[str] = frozenset(),
+    ) -> list[Any]:
+        """Expand a seed into variants at or past a generation.
+
+        `exclude_families` holds back rewrites that are not valid for this
+        target. A module knows which those are - a rewrite that only a bash
+        shell runs, an address spelling only one scheme accepts - and the
+        difference between holding it back and leaving it out entirely is
+        whether the tool can still use it when the target turns out to be the
+        kind that supports it.
+        """
         from ..core.mutate import Kind, generations
 
         start = max(0, generation)
-        ladder = generations(seed, kind=kind or Kind.SSRF, max_generation=start + 3, limit=limit)
+        ladder = generations(
+            seed,
+            kind=kind or Kind.SSRF,
+            max_generation=start + 3,
+            limit=limit,
+            exclude_families=exclude_families,
+        )
         return [variant for variant in ladder if variant.generation >= start]
 
 
@@ -242,8 +263,36 @@ class Engine:
                 continue
             break
 
+        self._finish_after_budget()
         self._recalibrate_if_barren()
         return self.ctx.blackboard
+
+    def _finish_after_budget(self) -> None:
+        """Say what the run found, even when it ran out of budget finding it.
+
+        The loop stops the moment the budget is spent, which can be before the
+        terminal state - so a run that tried everything and proved nothing ends
+        without a verdict, and the operator cannot tell that from a crash. What
+        the terminal state does is report, which needs no requests, so it is run
+        on the way out.
+
+        Only the terminal state, and only its reporting: an action that would
+        send traffic here would be spending a budget that has already been
+        declared spent.
+        """
+        if not self.ctx.stopped or "finish" in self.visited:
+            return
+        state = self.graph.state("finish") if "finish" in self.graph.states else None
+        if state is None:
+            return
+        self.ctx.emit("")
+        self.ctx.emit("[!] the request budget ran out before this run had an answer")
+        self.ctx.state = state.name
+        for action in state.actions:
+            try:
+                action.run(self.ctx)
+            except Exception as error:  # a summary must never be the reason a run dies
+                self.ctx.log(f"   action {action.id} failed: {error}")
 
     def _recalibrate_if_barren(self) -> None:
         """When the run found nothing, move the table back toward neutral.

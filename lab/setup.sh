@@ -14,6 +14,8 @@ set -euo pipefail
 
 LAB=/opt/injectorkit-lab
 PORT=8080
+# The PowerShell endpoint runs under its own server; see the note near the end.
+PS_PORT=8086
 REQUIRED_FILES=(www/index.php www/fetch.php www/include.php www/redirect.php internal.py javalab/ProtoLab.java)
 
 for relative in "${REQUIRED_FILES[@]}"; do
@@ -144,12 +146,28 @@ if command -v javac >/dev/null 2>&1; then
 fi
 
 echo "[6/6] done"
+
+# The PowerShell endpoint needs its own server. Apache cannot start pwsh: the
+# .NET runtime is refused executable memory inside that process - its error log
+# says `mprotect() failed [13] Permission denied` - while the same binary runs
+# fine outside it. So this one endpoint is served by the PHP built-in server,
+# where the shell really does run. Nothing about the target is faked: it is the
+# same page, and the command it hands to the shell is a real one.
+if command -v pwsh >/dev/null 2>&1; then
+    pkill -f "php -S 0.0.0.0:$PS_PORT" 2>/dev/null || true
+    sleep 1
+    setsid nohup php -S 0.0.0.0:$PS_PORT -t "$LAB/www" >/tmp/ik-php-pwsh.log 2>&1 &
+    sleep 1
+fi
+
 cat <<EOF
 
   web        http://<this-host>:$PORT/
   ssrf       http://<this-host>:$PORT/fetch.php?url=<url>
   lfi        http://<this-host>:$PORT/include.php?file=<path>
   redirect   http://<this-host>:$PORT/redirect.php?to=<url>
+  cmdi       http://<this-host>:$PORT/cmdi.php?cmd=<cmd>|host=<arg>|bash=<cmd>|safe=<arg>
+  powershell http://<this-host>:$PS_PORT/cmdi.php?ps=<cmd>   (own server; see the note above)
   java       http://<this-host>:9100/fetch?url=<url>   (jar:, jrt:, netdoc:)
 
   internal   redis 127.0.0.1:6379 (real)

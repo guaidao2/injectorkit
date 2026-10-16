@@ -184,6 +184,29 @@ def build_oob(args: argparse.Namespace, log) -> OOBListener | "InteractshClient"
     return listener
 
 
+def make_output_safe() -> None:
+    """Stop a target's bytes from ending the run.
+
+    A response body is decoded latin-1 so that no byte is ever lost, which means
+    every byte above 0x7f becomes a character - and a console whose code page
+    cannot represent it raises on print. Measured on Windows: a command whose
+    output contained UTF-8 bytes ended the run with a UnicodeEncodeError while it
+    was printing the answer it had just gone and got. The bytes are still in the
+    finding and on the board; only the terminal cannot show them, and that is not
+    a reason to lose the run.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(errors="replace")
+        except (ValueError, OSError):
+            # A stream that cannot be reconfigured is one the platform owns, and
+            # the writes will either work or raise somewhere that is not here.
+            continue
+
+
 def build_runtime(args: argparse.Namespace) -> Runtime:
     runtime = Runtime(
         transport=build_transport(args),

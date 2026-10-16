@@ -48,21 +48,22 @@ REFUSAL_WORDING = (
     "拦截",
 )
 
-# What a WAF leaves in a response that names it.
+# What a filter leaves in a response that names it.
 #
-# Taken from wafw00f's plugins (https://github.com/EnableSecurity/wafw00f), which
-# is the tool that exists to answer this question and carries 173 products'
-# worth of signatures. Only the ones worth having here are kept: this tool needs
-# to know whether something is filtering and which product it is, because that
-# decides which spellings are worth trying - it is not trying to name every WAF
-# in existence.
+# The question this answers is narrow: is something filtering, and which family
+# of rules is it - because that decides which spellings are worth trying next.
+# Naming every product that exists does not help with that, so the list is short
+# on purpose and every entry is a single mark a product puts on a response it is
+# in front of: a header it sets, a cookie only it plants, wording it serves.
 #
-# The shapes are wafw00f's, kept as they were written: a header that the product
-# sets, a cookie only it plants, or a string that carries its name. Generic
-# refusal wording - "request blocked", "access denied" - is deliberately absent,
-# because a great many filters say it and matching it would attribute every
-# refusal to whichever product happened to be listed first. Where the original
-# needs a combination, the combination is kept.
+# Generic refusal wording ("request blocked", "access denied") is deliberately
+# absent. A great many filters say it, and matching it would attribute every
+# refusal to whichever product happened to be listed first. Where a product is
+# only recognisable from a combination, all of the combination is required.
+#
+# wafw00f (https://github.com/EnableSecurity/wafw00f) is the reference tool for
+# this question and was consulted for it; the entries here were chosen for this
+# decision and reduced to marks, not taken as a plugin's decision procedure.
 #
 # (header name, pattern) pairs matched against the response headers, with the
 # pattern treated as a regular expression, case-insensitively.
@@ -72,7 +73,7 @@ VENDOR_HEADERS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     ("Fastly", (("x-fastly-request-id", r"\w+"), ("x-served-by", r"^cache-[a-z]{3}\d+-[A-Z]{3}"))),
     ("Safedog", (("server", r"safedog"),)),
     ("Wordfence", (("server", r"wf[_\-]?waf"),)),
-    ("ModSecurity", (("server", r"(mod_security|mod_security|noyb)"),)),
+    ("ModSecurity", (("server", r"(mod_security|noyb)"),)),
 )
 
 # Cookie names a product plants. Matched against Set-Cookie.
@@ -411,6 +412,24 @@ class Bypass:
     def refusals(self) -> int:
         """How many requests the target refused outright."""
         return sum(profile.refusals for profile in self.profiles.values())
+
+    def filter_class(self, host: str) -> str:
+        """A short name for what is in front of this host.
+
+        What a run learns about rewrites belongs to a *class* of target rather
+        than to one target: a spelling that beat one product's rules is worth
+        trying first against the same product somewhere else, and one that failed
+        against a target with no filter says nothing about any other. So the
+        name has to be of the kind of filter, and a target that has none is its
+        own kind rather than an unknown one.
+        """
+        profile = self.profile(host)
+        if profile.vendor:
+            return profile.vendor.lower().replace(" ", "-")
+        if profile.signature.known:
+            marks = [str(status) for status in profile.signature.statuses[:2]]
+            return "filtered-" + "-".join(marks) if marks else "filtered-wording"
+        return "unfiltered"
 
     def blocked_families(self) -> dict[str, int]:
         """Which payload families are closed, and how many rewrites proved it.

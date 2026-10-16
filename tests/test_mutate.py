@@ -9,7 +9,16 @@ from __future__ import annotations
 
 import unittest
 
-from injectorkit.core.mutate import Kind, Mutator, Variant, all_mutators, applicable, generations, mutator
+from injectorkit.core.mutate import (
+    Kind,
+    Mutator,
+    Variant,
+    all_mutators,
+    applicable,
+    generations,
+    mutator,
+    register,
+)
 
 
 class VariantDescription(unittest.TestCase):
@@ -106,6 +115,56 @@ class Registry(unittest.TestCase):
         names = [item.name for item in all_mutators()]
         self.assertGreater(len(names), 5)
         self.assertEqual(len(names), len(set(names)), "a name is registered twice")
+
+    def test_registering_twice_does_not_double_the_catalogue(self):
+        # A module registers when it is imported, and a test that imports it may
+        # register again. Two entries under one name is a rewrite sent twice.
+        before = [item.name for item in all_mutators()]
+        item = all_mutators()[0]
+        register(item)
+        self.assertEqual([entry.name for entry in all_mutators()], before)
+
+    def test_every_rewrite_fits_in_one_generation(self):
+        """A budget smaller than the catalogue is a rewrite that is never sent.
+
+        The budget used to be a fixed number, and two of the classes already had
+        more rewrites than it - so whichever ones ranked last were never tried,
+        silently. Adding a rewrite has to widen the generation, not starve the
+        one at the end of it.
+        """
+        from injectorkit.engine.inject import generation_budget
+
+        for kind in Kind:
+            available = len(applicable(kind))
+            if not available:
+                continue
+            self.assertGreaterEqual(
+                generation_budget(kind, frozenset()),
+                available,
+                f"{kind.value}: the generation is smaller than its catalogue",
+            )
+
+    def test_the_catalogue_stays_under_the_generation_ceiling(self):
+        """When the catalogue reaches the ceiling the two rules conflict.
+
+        The budget is the catalogue when the catalogue is smaller, so every
+        rewrite reaches the wire; the ceiling caps it so a grown catalogue cannot
+        turn one parameter into a flood. Past the ceiling a rewrite starts being
+        dropped for want of budget, and that has to be a failing test rather than
+        something somebody notices later.
+        """
+        from injectorkit.engine.inject import GENERATION_CEILING
+
+        for kind in Kind:
+            available = len(applicable(kind))
+            if not available:
+                continue
+            self.assertLess(
+                available,
+                GENERATION_CEILING,
+                f"{kind.value}: the catalogue has reached the ceiling, so a rewrite is being "
+                "dropped for want of budget - raise GENERATION_CEILING or split the family",
+            )
 
     def test_a_mutator_can_be_found_by_name(self):
         first = all_mutators()[0]

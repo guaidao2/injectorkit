@@ -264,5 +264,40 @@ class TimingUsesTheTargetsOwnVariation(unittest.TestCase):
         self.assertFalse(Judge().timing([0.05], expected=1.0).confirmed)
 
 
+class WhatCountsAsText(unittest.TestCase):
+    """A decoded view of a file has to survive being a file.
+
+    `str.isprintable()` is false for anything containing a newline, so every
+    decoded read of a real file was thrown away and kept only for one-liners.
+    """
+
+    def test_a_file_with_newlines_is_text(self):
+        from injectorkit.engine.evidence import _looks_like_text
+
+        self.assertTrue(_looks_like_text("root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1\n"))
+
+    def test_a_trailing_newline_is_still_text(self):
+        from injectorkit.engine.evidence import _looks_like_text
+
+        self.assertTrue(_looks_like_text("flag{one_line}\n"))
+
+    def test_binary_is_not_text(self):
+        from injectorkit.engine.evidence import _looks_like_text
+
+        self.assertFalse(_looks_like_text("\x00\x01\x02PK\x03\x04\xff"))
+
+    def test_empty_is_not_text(self):
+        from injectorkit.engine.evidence import _looks_like_text
+
+        self.assertFalse(_looks_like_text(""))
+
+    def test_a_decoded_file_becomes_a_view(self):
+        from injectorkit.engine.evidence import Judge
+
+        blob = base64.b64encode(b"root:x:0:0:root:/root\n")
+        body = b"<div>File contents:<br>" + blob + b"</div>"
+        self.assertIn("root:x:0:0:root:/root\n", Judge.decoded_views(body))
+
+
 if __name__ == "__main__":
     unittest.main()

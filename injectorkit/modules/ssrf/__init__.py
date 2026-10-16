@@ -71,7 +71,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "--rebind",
         metavar="INTERNAL,EXTERNAL",
         help="try each destination again under a DNS name that alternates between an internal "
-        "address and an external one, e.g. '169.254.169.254,192.168.44.1'. This is what gets past "
+        "address and an external one, e.g. '169.254.169.254,203.0.113.10'. This is what gets past "
         "a check that resolves the name once and connects later",
     )
 
@@ -82,7 +82,7 @@ def _rebind_name(value: str | None) -> str:
         return ""
     parts = [piece.strip() for piece in value.split(",")]
     if len(parts) != 2 or not all(parts):
-        raise SystemExit("--rebind expects INTERNAL,EXTERNAL, for example 169.254.169.254,192.168.44.1")
+        raise SystemExit("--rebind expects INTERNAL,EXTERNAL, for example 169.254.169.254,203.0.113.10")
     return rebind_host(parts[0], parts[1])
 
 

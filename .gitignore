@@ -28,5 +28,9 @@ build/
 sessions/
 *.session.json
 
+# Request and response traces from a run, and the session store beside them.
+# Target-specific evidence, and never part of the published repository.
+.output/
+
 # Cross-target priors on which rewrites work, learned at run time.
 .injectorkit/

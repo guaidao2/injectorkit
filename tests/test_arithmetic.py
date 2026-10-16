@@ -91,5 +91,21 @@ class WhatCountsAsProof(unittest.TestCase):
         self.assertEqual(check.proved(page), check.answer)
 
 
+    def test_the_answer_is_found_whichever_order_the_page_prints_it_in(self):
+        """A page may echo the command before running it or after, and neither
+        order can be assumed. Looking only at the last marker pair reports a
+        target that ran the command as one that did not."""
+        arithmetic = Arithmetic()
+        payload = arithmetic.command()
+        before = f"running: {payload}\n{arithmetic.open}\n{arithmetic.answer}\n{arithmetic.close}\n"
+        after = f"{arithmetic.open}\n{arithmetic.answer}\n{arithmetic.close}\nrunning: {payload}\n"
+        self.assertEqual(arithmetic.proved(before), arithmetic.answer)
+        self.assertEqual(arithmetic.proved(after), arithmetic.answer)
+
+    def test_an_echoed_payload_alone_still_proves_nothing(self):
+        arithmetic = Arithmetic()
+        self.assertIsNone(arithmetic.proved(f"running: {arithmetic.command()}"))
+
+
 if __name__ == "__main__":
     unittest.main()

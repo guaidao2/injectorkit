@@ -22,6 +22,45 @@ from injectorkit.engine.evidence import Judge
 from injectorkit.modules.proto.graph import MISSING_PATH, _differs_from_missing
 from injectorkit.modules.proto.seeds import Wrapper
 
+
+class BodyImpliesPost(unittest.TestCase):
+    """A request with a body is a POST unless the operator said otherwise.
+
+    A GET carrying a body is read by almost nothing: PHP fills `$_POST` only for
+    a POST, so the parameters are parsed out of the body by the tool and then
+    never seen by the application. Measured on a live target, every probe
+    answered with the page as though no parameter had been sent at all, and the
+    run reported no evidence on a parameter that was injectable.
+    """
+
+    def _request(self, argv: list[str]):
+        from injectorkit.cli import build_parser
+        from injectorkit.engine.runner import request_from_args
+
+        return request_from_args(build_parser().parse_args(argv), "proto")
+
+    def test_a_body_with_no_method_means_post(self):
+        self.assertEqual(
+            self._request(["proto", "-u", "https://t/", "--data", "f=1"]).method, "POST"
+        )
+
+    def test_no_body_still_means_get(self):
+        self.assertEqual(self._request(["proto", "-u", "https://t/"]).method, "GET")
+
+    def test_an_explicit_method_is_not_second_guessed(self):
+        request = self._request(["proto", "-u", "https://t/", "--data", "f=1", "-X", "PUT"])
+        self.assertEqual(request.method, "PUT")
+
+    def test_an_explicit_get_with_a_body_is_honoured(self):
+        request = self._request(["proto", "-u", "https://t/", "--data", "f=1", "-X", "GET"])
+        self.assertEqual(request.method, "GET")
+
+    def test_a_form_body_declares_itself_as_one(self):
+        request = self._request(["proto", "-u", "https://t/", "--data", "f=1"])
+        self.assertEqual(
+            request.headers.get("Content-Type"), "application/x-www-form-urlencoded"
+        )
+
 WRAPPER = Wrapper("bare", "{file}", family="read", signatures=("root:x:0:0",))
 
 
@@ -146,6 +185,71 @@ class StrippingTheEchoIsWhatMakesItWork(unittest.TestCase):
 
     def test_nothing_to_strip(self):
         self.assertEqual(Judge.strip_echo("page", ""), "page")
+
+
+class WhichFileToAskFor(unittest.TestCase):
+    """A wrapper's signatures and the files it is asked for have to agree.
+
+    Asking one target per wrapper leaves half of a wrapper's own signature list
+    unable to fire: it describes a file that is never requested, so the probe
+    cannot succeed however well the target behaves. Measured on a live target
+    where `php://filter/convert.base64-encode` was asked for `index.php` and
+    nothing else, answered with the base64 of an HTML page, and reported a
+    working read as no evidence - while `cm9vdDp4`, the base64 of `root:x`, had
+    been in that wrapper's signature list all along.
+    """
+
+    def _wrapper(self, payload: str, signatures: tuple[str, ...], family: str = "php-read"):
+        return Wrapper("w", payload, family=family, signatures=signatures)
+
+    def test_a_scheme_wrapper_is_asked_for_both_kinds_of_file(self):
+        from injectorkit.modules.proto.graph import _targets_for
+        from injectorkit.modules.proto.seeds import FILE_TARGETS
+
+        wrapper = self._wrapper(
+            "php://filter/convert.base64-encode/resource={file}",
+            ("PD9waHA", "cm9vdDp4"),
+        )
+        picked = _targets_for(wrapper, list(FILE_TARGETS))
+        self.assertEqual(len(picked), 2)
+        self.assertTrue(any(path.startswith("/") for path in picked))
+        self.assertTrue(any(not path.startswith("/") for path in picked))
+
+    def test_a_wrapper_naming_a_system_file_is_asked_for_one_first(self):
+        from injectorkit.modules.proto.graph import _targets_for
+        from injectorkit.modules.proto.seeds import FILE_TARGETS
+
+        wrapper = self._wrapper("php://filter/resource={file}", ("root:x:0:0",))
+        picked = _targets_for(wrapper, list(FILE_TARGETS))
+        self.assertTrue(picked[0].startswith("/"), picked)
+
+    def test_a_wrapper_that_serves_the_application_is_asked_for_that_first(self):
+        from injectorkit.modules.proto.graph import _targets_for
+        from injectorkit.modules.proto.seeds import FILE_TARGETS
+
+        wrapper = self._wrapper("php://filter/resource={file}", ("<?php",))
+        picked = _targets_for(wrapper, list(FILE_TARGETS))
+        self.assertFalse(picked[0].startswith("/"), picked)
+
+    def test_a_plain_path_wrapper_still_gets_one_absolute_path(self):
+        from injectorkit.modules.proto.graph import _targets_for
+        from injectorkit.modules.proto.seeds import FILE_TARGETS
+
+        wrapper = self._wrapper("{file}", ("root:x:0:0",), family="read")
+        picked = _targets_for(wrapper, list(FILE_TARGETS))
+        self.assertEqual(len(picked), 1)
+        self.assertTrue(picked[0].startswith("/"))
+
+    def test_a_named_file_is_the_only_thing_asked_for(self):
+        from injectorkit.modules.proto.graph import _targets_for
+
+        wrapper = self._wrapper("php://filter/resource={file}", ("PD9waHA",))
+        self.assertEqual(_targets_for(wrapper, ["/tmp/flag"]), ["/tmp/flag"])
+
+    def test_no_targets_asks_for_nothing(self):
+        from injectorkit.modules.proto.graph import _targets_for
+
+        self.assertEqual(_targets_for(self._wrapper("php://x/{file}", ("<?php",)), []), [])
 
 
 if __name__ == "__main__":
