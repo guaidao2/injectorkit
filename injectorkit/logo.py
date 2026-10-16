@@ -24,7 +24,7 @@ ART = r"""
          \/ \______|     \/      \/                             \/
 """
 
-TAGLINE = "injection and protocol toolkit"
+TAGLINE = "web exploitation across several vulnerability classes"
 PROJECT = "github.com/guaidao2/injectorkit"
 AUTHORS = "coolmoon and guaidao2"
 

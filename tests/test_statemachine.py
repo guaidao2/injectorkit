@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import unittest
 
+from injectorkit.engine.blackboard import Blackboard
+from injectorkit.engine.pheromone import PheromoneTable
 from injectorkit.engine.statemachine import Action, State, StateGraph, Transition
 
 
@@ -74,6 +76,104 @@ class WhatTheOperatorAskedFor(unittest.TestCase):
         item = Action(id="exploit", description="run code", run=noop, wanted="exploit")
         self.assertTrue(item.is_wanted({"exploit": True}))
         self.assertFalse(item.is_wanted({"exploit": False}))
+
+
+class WhatAResumedRunOwesTheOperator(unittest.TestCase):
+    """The account belongs to this run, not to the one that wrote the session.
+
+    A `not_covered` entry says a condition was missing - no listener, no switch -
+    and it is saved with the session. Nothing used to take it back, so a later
+    run that supplied the condition printed the earlier run's excuse beside the
+    work it had just done: measured, `proto --exploit --os-cmd 'id'` ran the
+    chain, printed its output, and still reported "not requested; pass
+    --exploit to run code on the target".
+
+    The entry also doubled as a prune, because the state machine skipped on
+    "settled either way" - so `probe.remote` was skipped forever after one run
+    without a listener, and an action pruned that way never gets to notice that
+    the operator has since supplied what it asked for.
+    """
+
+    def graph_that_runs(self, ran, wanted=None):
+        def body(ctx) -> None:
+            ran.append(ctx.config.get("exploit"))
+
+        graph = StateGraph(name="t", start="s")
+        graph.add(
+            State(
+                name="s",
+                description="the exploit state",
+                actions=[
+                    Action(
+                        id="exploit.chain",
+                        description="run the chain",
+                        run=body,
+                        wanted=wanted,
+                    )
+                ],
+            )
+        )
+        return graph
+
+    def run_it(self, board, ran, config=None, wanted=None):
+        from injectorkit.engine.statemachine import Engine, RunContext
+
+        graph = self.graph_that_runs(ran, wanted)
+        ctx = RunContext(
+            graph=graph,
+            transport=None,
+            blackboard=board,
+            pheromone=PheromoneTable(path="", enabled=False),
+            config=config or {},
+            max_requests=10,
+        )
+        Engine(graph, ctx).run()
+        return ctx
+
+    def board_with_a_stale_entry(self):
+        board = Blackboard(target="t")
+        board.mark_not_covered("exploit.chain", "not requested; pass --exploit")
+        return board
+
+    def test_an_entry_about_a_missing_condition_does_not_prune_the_action(self):
+        board = self.board_with_a_stale_entry()
+        ran: list = []
+        self.run_it(board, ran, config={"exploit": True})
+        self.assertEqual(ran, [True], "the action has to get to re-check the condition")
+
+    def test_running_the_action_takes_the_entry_back(self):
+        board = self.board_with_a_stale_entry()
+        ctx = self.run_it(board, [], config={"exploit": True})
+        self.assertNotIn("exploit.chain", ctx.blackboard.not_covered)
+
+    def test_the_action_puts_it_back_when_the_condition_is_still_missing(self):
+        board = self.board_with_a_stale_entry()
+
+        def body(ctx) -> None:
+            ctx.blackboard.mark_not_covered("exploit.chain", "not requested; pass --exploit")
+
+        graph = StateGraph(name="t", start="s")
+        graph.add(State(name="s", description="", actions=[Action("exploit.chain", "run", body)]))
+        from injectorkit.engine.statemachine import Engine, RunContext
+
+        ctx = RunContext(
+            graph=graph,
+            transport=None,
+            blackboard=board,
+            pheromone=PheromoneTable(path="", enabled=False),
+            max_requests=10,
+        )
+        Engine(graph, ctx).run()
+        self.assertEqual(
+            ctx.blackboard.not_covered.get("exploit.chain"), "not requested; pass --exploit"
+        )
+
+    def test_a_dead_end_still_prunes(self):
+        board = Blackboard(target="t")
+        board.mark_dead_end("exploit.chain", "the target refused it")
+        ran: list = []
+        self.run_it(board, ran, config={"exploit": True})
+        self.assertEqual(ran, [], "a path that was tried and closed is still closed")
 
 
 class Transitions(unittest.TestCase):

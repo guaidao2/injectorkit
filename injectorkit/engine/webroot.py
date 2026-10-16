@@ -26,6 +26,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from .blackboard import Confidence
+
 # Where each server's distribution package puts the document root.
 #
 # One entry per package, because that is where the list comes from: a stock
@@ -326,7 +328,16 @@ def note_read(board, path: str, body: str = "") -> None:
     where files live.
     """
     if path and path.startswith("/"):
-        board.add(READ_PATHS, _tidy(path))
+        # An observation, not an inference: this is only reached for a wrapper
+        # that reads, and it got an answer. Labelling it inconclusive by taking
+        # the default put "why is this doubtful?" beside a path whose contents
+        # are printed further down the same report.
+        board.add(
+            READ_PATHS,
+            _tidy(path),
+            evidence="the run read this path",
+            confidence=Confidence.CONFIRMED,
+        )
     for stated in webroot_from_config(body):
         board.add(STATED_ROOTS, stated)
 

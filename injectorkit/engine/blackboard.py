@@ -150,6 +150,28 @@ class Blackboard:
         """
         self.not_covered[key] = reason
 
+    def forget_not_covered(self, key: str) -> None:
+        """Drop a "never tried" entry, for when it stops being true.
+
+        Every one of these is about a condition - no listener, no switch, no
+        upload path - and a condition can be supplied on the next run. The entry
+        is persisted with the session, so without this the summary reports the
+        previous run's excuse beside work that just happened: with `--exploit`
+        given and the chain run, `not requested; pass --exploit` was still
+        printed, because nothing ever took the line back.
+        """
+        self.not_covered.pop(key, None)
+
+    def is_ruled_out(self, key: str) -> bool:
+        """Whether a path was tried and closed.
+
+        Only the dead ends. A `not_covered` entry is a to-do, not a verdict: the
+        operator can pass the listener or the switch next time, and pruning on it
+        would mean the action never gets to notice that they did - so
+        `probe.remote` would be skipped forever after one run without a listener.
+        """
+        return key in self.dead_ends
+
     def is_dead(self, key: str) -> bool:
         """Whether a path is settled, either way."""
         return key in self.dead_ends or key in self.not_covered

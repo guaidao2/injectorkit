@@ -196,7 +196,8 @@ class _VersionAction(argparse.Action):
 def build_parser() -> argparse.ArgumentParser:
     parser = _BannerParser(
         prog="injectorkit.py",
-        description="InjectorKit - exploitation toolkit for CTF and authorized penetration testing",
+        description="InjectorKit - a web exploitation toolkit covering several "
+        "vulnerability classes, for CTF and authorized penetration testing",
     )
     parser.add_argument("--version", action=_VersionAction)
 

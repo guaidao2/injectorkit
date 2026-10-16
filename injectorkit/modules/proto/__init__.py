@@ -305,6 +305,14 @@ def run_shell(args: argparse.Namespace, runtime) -> int:
             banner=runtime.paint(f"{where} on {request.host()}", "section"),
         )
     finally:
+        # This path shares the board with the scan, and the board carries what an
+        # earlier scan did not cover. This run is not that scan - the state machine
+        # stays out of it - so nothing here re-derives those entries, and the one
+        # saying execution was "not requested; pass --exploit" is false by
+        # construction: reaching this path means --os-cmd, --os-shell or
+        # --log-path was given. Dropped rather than printed underneath the command
+        # it just ran.
+        board.forget_not_covered("exploit.filter_chain")
         # A shell is the place an interrupt is most likely, and what was learned
         # about the filter on the way in is what the next attempt wants.
         emit_summary(runtime, board, args)

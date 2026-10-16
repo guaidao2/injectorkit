@@ -2,17 +2,20 @@
 
 [简体中文](README.zh-CN.md) · English · [Guide](GUIDE.md)
 
-An exploitation toolkit for CTF and authorized penetration testing.
+A web exploitation toolkit covering several vulnerability classes, for CTF and
+authorized penetration testing.
 
 InjectorKit is the offensive counterpart to a traffic-driven scanner. It does
 not ask "is this parameter vulnerable" and stop there; it probes, reads the
 evidence, decides what to try next, adapts when a filter refuses, and keeps
 going until it has an exploit or has proven the path closed.
 
-The classes it covers are SSRF, PHP and Java protocol wrappers (`php://`,
-`gopher://`, `dict://`, `data://`, `phar://`, `jar:`, `jrt:`) and command
-injection. Further classes, including deserialization, are built on the same
-engine.
+One engine, several classes: SSRF, PHP and Java protocol wrappers (`php://`,
+`gopher://`, `dict://`, `data://`, `phar://`, `jar:`, `jrt:`), command
+injection, and deserialization through `phar://` and `unserialize()` - the last
+reached through `proto`, because what it needs is a wrapper and a value the
+application hands to an unserializer. The classes share the engine, so adding
+one adds knowledge rather than another scanner.
 
 ## Start here
 

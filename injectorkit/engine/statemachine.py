@@ -237,7 +237,7 @@ class Engine:
             for action in state.actions:
                 if self.ctx.stopped:
                     break
-                if self.ctx.blackboard.is_dead(action.id):
+                if self.ctx.blackboard.is_ruled_out(action.id):
                     self.ctx.log(f"   already ruled out: {action.description}")
                     continue
                 done = f"ran.{action.id}"
@@ -245,6 +245,13 @@ class Engine:
                     self.ctx.info(f"skipping {action.description}: already tried on this page")
                     continue
                 self.ctx.info(f"testing {action.description}")
+                # Whatever an earlier run wrote here was about that run's argv.
+                # The action is about to run: if the condition is still missing it
+                # writes the entry again in its own words, and if the operator has
+                # since supplied it the entry is no longer true. Leaving it is how
+                # a run that was given --exploit printed "not requested; pass
+                # --exploit" beside the chain it had just run.
+                self.ctx.blackboard.forget_not_covered(action.id)
                 try:
                     action.run(self.ctx)
                 except Exception as error:  # a broken action must not end the run

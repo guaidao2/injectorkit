@@ -294,5 +294,45 @@ class ACommandThatWasRun(unittest.TestCase):
         self.assertEqual(Blackboard(target="t").render_findings(), "")
 
 
+class WhatIsSettledAndWhatIsATodo(unittest.TestCase):
+    """A dead end is a verdict; "not covered" is a question that can be reopened.
+
+    Both stop a retry, but they are not the same thing: "the target refused it"
+    stays true, and "there was no listener when it ran" stops being true the
+    moment the operator passes one. Conflating them is how an action gets pruned
+    forever by a reason the next invocation has already answered.
+    """
+
+    def test_a_dead_end_is_ruled_out(self):
+        board = Blackboard(target="t")
+        board.mark_dead_end("probe.remote", "the target refused it")
+        self.assertTrue(board.is_ruled_out("probe.remote"))
+        self.assertTrue(board.is_dead("probe.remote"))
+
+    def test_a_missing_condition_is_not_ruled_out(self):
+        board = Blackboard(target="t")
+        board.mark_not_covered("probe.remote", "no listener was given")
+        self.assertFalse(board.is_ruled_out("probe.remote"))
+        self.assertTrue(board.is_dead("probe.remote"), "it is still an open question")
+
+    def test_a_todo_can_be_taken_back(self):
+        board = Blackboard(target="t")
+        board.mark_not_covered("probe.remote", "no listener was given")
+        board.forget_not_covered("probe.remote")
+        self.assertNotIn("probe.remote", board.not_covered)
+        self.assertFalse(board.is_dead("probe.remote"))
+
+    def test_taking_back_something_that_was_never_there_is_harmless(self):
+        board = Blackboard(target="t")
+        board.forget_not_covered("never.recorded")
+        self.assertEqual(board.not_covered, {})
+
+    def test_a_dead_end_is_not_taken_back_by_forgetting_a_todo(self):
+        board = Blackboard(target="t")
+        board.mark_dead_end("probe.remote", "the target refused it")
+        board.forget_not_covered("probe.remote")
+        self.assertTrue(board.is_ruled_out("probe.remote"))
+
+
 if __name__ == "__main__":
     unittest.main()

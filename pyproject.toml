@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "injectorkit"
-version = "0.2.0"
-description = "Exploitation toolkit for CTF and authorized penetration testing"
+version = "0.2.1"
+description = "Web exploitation toolkit covering several vulnerability classes, for CTF and authorized penetration testing"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }

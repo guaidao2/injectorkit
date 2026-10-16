@@ -942,6 +942,12 @@ def report_summary(ctx: RunContext) -> None:
         ctx.blackboard.mark_not_covered(
             "exploit.filter_chain", "not requested; pass --exploit to run code on the target"
         )
+    else:
+        # The switch is on, so that sentence is not true of this run - and the
+        # entry is carried in the session file from a run where it was. If the
+        # chain still did not run, the action says why in its own words; repeating
+        # the old reason here would contradict the work this run just did.
+        ctx.blackboard.forget_not_covered("exploit.filter_chain")
 
     proven = bool(ctx.blackboard.get(PROVEN))
     refusals = ctx.bypass.refusals()

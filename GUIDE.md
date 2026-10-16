@@ -602,6 +602,10 @@ blind probes, no `--exploit` for the follow-up, no upload path for the archive
 wrappers. If a line there surprises you, that is a hole in the run, not a
 finding about the target.
 
+It is a statement about the run, not about the target, and it is rewritten every
+time: supply the listener or the switch and the line goes. A `closed path` is the
+opposite - the target was asked and refused - so that one stays.
+
 The output is coloured when a person is reading it, and plain when it is not: a
 pipe, a redirect or a log file gets text with nothing to strip out of it. The
 default asks the stream and honours NO_COLOR - the convention terminals and log
