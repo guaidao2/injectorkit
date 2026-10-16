@@ -76,6 +76,19 @@ def unbound_reads(tree: ast.AST) -> list[tuple[str, int]]:
     return sorted(missing.items(), key=lambda item: item[1])
 
 
+def statements(node: ast.AST):
+    """Every statement in this tree, in source order."""
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, ast.stmt):
+            yield child
+            yield from statements(child)
+
+
+def called_name(func: ast.AST, aliases: dict[str, str]) -> str:
+    name = getattr(func, "id", None) or getattr(func, "attr", None)
+    return aliases.get(name, name)
+
+
 def unpack_mismatches(tree: ast.AST, arities: dict[str, int]) -> list[tuple[str, int, int, int]]:
     """Calls unpacked into the wrong number of names, with the line.
 
@@ -84,24 +97,60 @@ def unpack_mismatches(tree: ast.AST, arities: dict[str, int]) -> list[tuple[str,
     only on the one code path that reaches it - the exploitation chain, where
     nobody was looking until the tool was pointed at a live target and reported
     the whole step as `raised ValueError`.
+
+    Two ways of writing it are checked, because the second is the one this
+    codebase actually uses:
+
+        a, b = inject(...)              the call and the unpack on one line
+        outcome = inject(...)           the call on one line
+        a, b = outcome                  and the unpack on the next
+
+    The first version of this only saw the first shape, so it reported nothing
+    about the form every call site in the package is written in - a guard that
+    cannot see the mistake it was written for is not a guard. Names bound to a
+    known call are remembered per function body, and an unpack of one of them is
+    checked against the arity it was bound with.
     """
     aliases: dict[str, str] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             for alias in node.names:
                 aliases[alias.asname or alias.name] = alias.name
+
     problems: list[tuple[str, int, int, int]] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+    # Binding name -> (arity, the function it came from), so the report names the
+    # call and not the variable somebody happened to store it in.
+    bound: dict[str, tuple[int, str]] = {}
+    for node in statements(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # A new scope: an outer binding is not this function's to unpack.
+            bound = {}
             continue
-        target = node.targets[0]
-        call = node.value
-        if not isinstance(target, ast.Tuple) or not isinstance(call, ast.Call):
+        if isinstance(node, ast.AnnAssign):
+            target, value = node.target, node.value
+        elif isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target, value = node.targets[0], node.value
+        else:
             continue
-        name = getattr(call.func, "id", None) or getattr(call.func, "attr", None)
-        name = aliases.get(name, name)
-        if name in arities and len(target.elts) != arities[name]:
-            problems.append((name, arities[name], len(target.elts), node.lineno))
+        if value is None:
+            continue
+
+        if isinstance(target, ast.Name) and isinstance(value, ast.Call):
+            name = called_name(value.func, aliases)
+            if name in arities:
+                bound[target.id] = (arities[name], name)
+            continue
+
+        if not isinstance(target, ast.Tuple):
+            continue
+        if isinstance(value, ast.Call):
+            name = called_name(value.func, aliases)
+            if name in arities and len(target.elts) != arities[name]:
+                problems.append((name, arities[name], len(target.elts), node.lineno))
+        elif isinstance(value, ast.Name) and value.id in bound:
+            want, name = bound[value.id]
+            if len(target.elts) != want:
+                problems.append((name, want, len(target.elts), node.lineno))
     return problems
 
 
@@ -181,6 +230,31 @@ class TheCheckerItself(unittest.TestCase):
         tree = ast.parse("def f(ctx):\n    _, exchange, _ = inject(ctx, p, 'x', 'a')\n")
         problems = unpack_mismatches(tree, {"inject": 2, "inject_escalating": 3})
         self.assertEqual(problems, [("inject", 2, 3, 2)])
+
+    def test_it_reports_the_two_line_form_the_package_actually_uses(self):
+        # The call on one line and the unpack on the next, which is how every
+        # call site in this repository is written.
+        source = "def f(ctx):\n    outcome = inject(ctx, p, 'x', 'a')\n    _, e, _ = outcome\n"
+        self.assertEqual(
+            unpack_mismatches(ast.parse(source), {"inject": 2}), [("inject", 2, 3, 3)]
+        )
+
+    def test_the_two_line_form_with_the_right_arity_is_not_reported(self):
+        source = "def f(ctx):\n    outcome = inject(ctx, p, 'x', 'a')\n    r, e = outcome\n"
+        self.assertEqual(unpack_mismatches(ast.parse(source), {"inject": 2}), [])
+
+    def test_an_unpack_of_something_else_is_not_reported(self):
+        source = "def f():\n    a, b = something_else()\n"
+        self.assertEqual(unpack_mismatches(ast.parse(source), {"inject": 2}), [])
+
+    def test_a_binding_in_one_function_is_not_used_in_another(self):
+        source = (
+            "def f(ctx):\n"
+            "    outcome = inject(ctx, p, 'x', 'a')\n"
+            "def g():\n"
+            "    a, b, c = outcome\n"
+        )
+        self.assertEqual(unpack_mismatches(ast.parse(source), {"inject": 2}), [])
 
     def test_the_right_arity_is_not_reported(self):
         tree = ast.parse("def f(ctx):\n    r, e = inject(ctx, p, 'x', 'a')\n")

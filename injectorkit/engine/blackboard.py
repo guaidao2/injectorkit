@@ -268,9 +268,13 @@ class Blackboard:
             lines.append("Files read:")
             for path, content in reads:
                 lines.append(f"    {path}")
-                for line in content.splitlines()[:READ_LINES]:
+                body = content.splitlines()
+                if not body:
+                    lines.append("      (the file is empty)")
+                    continue
+                for line in body[:READ_LINES]:
                     lines.append(f"      {line}")
-                extra = len(content.splitlines()) - READ_LINES
+                extra = len(body) - READ_LINES
                 if extra > 0:
                     lines.append(f"      ... {extra} more line(s)")
         if runs:
@@ -297,13 +301,17 @@ class Blackboard:
         when several wrappers turned out to reach it - which one worked is in the
         findings above, and saying the same file four times buries the one thing
         that was asked for.
+
+        A file with nothing in it is still shown. "I read it and it is empty" is
+        an answer to what was asked; dropping it here is how the operator gets
+        silence and cannot tell it from a read that never happened.
         """
         out: list[tuple[str, str]] = []
         for key, fact in self.facts.items():
             if not key.startswith(READ_FACT_PREFIX):
                 continue
             path = key[len(READ_FACT_PREFIX) :]
-            if isinstance(fact.value, str) and fact.value:
+            if isinstance(fact.value, str):
                 out.append((path, fact.value))
         return sorted(out)
 
@@ -397,6 +405,19 @@ class Blackboard:
             return ""
         lines = ["[*] actions tried on this page:"]
         for key in keys:
-            action = key[len("ran.") :]
-            lines.append(f"    {action}")
+            lines.append(f"    {self._without_prefix(key)}")
         return "\n".join(lines)
+
+    def _without_prefix(self, key: str) -> str:
+        """The key with its standing prefix removed, and only if it has one.
+
+        Three prefixes end up in this renderer now - `ran.` for actions and
+        `bypass.` / `filter.` for what the filter subsystem worked out - so
+        slicing a fixed four characters off every key turned `bypass.floor...`
+        into `ss.floor...` and `run.command.id` into `command.id`. A mangled name
+        is worse than a long one: it cannot be searched for.
+        """
+        for prefix in self.BOOKKEEPING:
+            if key.startswith(prefix):
+                return key[len(prefix) :]
+        return key

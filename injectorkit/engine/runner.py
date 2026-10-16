@@ -9,6 +9,7 @@ graph itself, and each module brings its own.
 
 from __future__ import annotations
 
+import os
 from urllib.parse import urlsplit
 
 from ..core.forms import form_request, parse_forms
@@ -321,6 +322,16 @@ def run_targets(args, runtime, module: str, likely: frozenset[str], handler) -> 
     """
     targets = collect_targets(args, runtime, module)
     if len(targets) > 1:
+        if getattr(args, "state", None):
+            # One named file cannot hold several boards. Without this the last
+            # target's progress is what is left on disk and the others are gone,
+            # silently - which reads exactly like a run that saved everything.
+            # The automatic store keys by host and path and is the one that
+            # handles a batch.
+            raise SystemExit(
+                f"--state names one file, and this run has {len(targets)} targets; "
+                "leave it out to keep progress per target in the automatic store"
+            )
         runtime.info(f"testing {len(targets)} targets")
 
     # Whatever the operator passed with -H is injectable by name, above and
@@ -355,6 +366,22 @@ def run_targets(args, runtime, module: str, likely: frozenset[str], handler) -> 
     return 0
 
 
+def forget_state_file(path: str) -> str:
+    """Remove a named state file, and say what was done about it.
+
+    Returning a sentence rather than a bool because the operator needs the path:
+    "starting fresh" on its own does not say whether there was anything to
+    forget, and the two are different messages.
+    """
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        return f"{path} was not there"
+    except OSError as error:
+        raise SystemExit(f"could not remove the state file {path}: {error}") from error
+    return f"{path} was removed"
+
+
 def open_board(args, runtime, request: Request) -> Blackboard:
     """A board for this target: an explicit state file, or the automatic store.
 
@@ -372,9 +399,12 @@ def open_board(args, runtime, request: Request) -> Blackboard:
     if explicit:
         if getattr(args, "flush_session", False):
             # "Forget what an earlier run learned" has to mean the same thing
-            # whichever store it was in. Reading the named file anyway is how the
-            # operator asks for a clean slate and is told what was carried over.
-            runtime.info(f"starting fresh; {explicit} was not read")
+            # whichever store it was in. Merely declining to read the named file
+            # is not that: the run then overwrites it at the end, so an operator
+            # who asked for a clean slate cannot tell a flush from a truncation -
+            # and a run that dies half way leaves the previous facts on disk
+            # having said it started fresh. The file goes.
+            runtime.info(f"starting fresh; {forget_state_file(explicit)}")
             return board
         resumed = resume_session(explicit, board.target)
         if resumed is not None:

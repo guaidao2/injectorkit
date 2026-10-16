@@ -220,11 +220,16 @@ class AFileThatWasRead(unittest.TestCase):
     def test_a_file_is_listed_once_however_it_was_reached(self):
         self.assertEqual(len(self.board().reads()), 1)
 
-    def test_an_empty_file_is_not_a_result(self):
+    def test_an_empty_file_is_still_a_result(self):
+        # "I read it and there is nothing in it" is an answer to what was asked.
+        # Dropping it is how the operator gets silence and cannot tell it from a
+        # read that never happened.
         board = Blackboard(target="t")
-        board.set("read.file./nope", "", evidence="nothing", confidence=Confidence.CONFIRMED)
-        self.assertEqual(board.reads(), [])
-        self.assertNotIn("Files read:", board.render_findings())
+        board.set("read.file./empty", "", evidence="read", confidence=Confidence.CONFIRMED)
+        self.assertEqual(board.reads(), [("/empty", "")])
+        block = board.render_findings()
+        self.assertIn("Files read:", block)
+        self.assertIn("(the file is empty)", block)
 
     def test_a_file_is_still_listed_after_a_session_is_reloaded(self):
         board = Blackboard.from_json(self.board().to_json())

@@ -25,7 +25,7 @@ import re
 import secrets
 
 from ...core.filters import php_runner
-from ...core.mutate import Kind, Variant
+from ...core.mutate import Kind, Variant, mutator
 from ...engine.blackboard import READ_FACT_PREFIX, Confidence
 from ...engine.evidence import Judge, Verdict
 from ...engine.filterprobe import probe_filter, probe_without_agent
@@ -193,7 +193,7 @@ MISSING_PATH = "/nonexistent-ik-probe/does-not-exist"
 
 
 def _differs_from_missing(
-    ctx: RunContext, param, wrapper: Wrapper, target: str, seen: str, payload: str
+    ctx: RunContext, param, wrapper: Wrapper, target: str, seen: str, variant
 ) -> bool:
     """Whether asking for a file that is not there produces something else.
 
@@ -203,6 +203,13 @@ def _differs_from_missing(
     back with bytes no table matches. One extra request answers what a table
     cannot: the same wrapper, the same parameter, a path that cannot exist.
 
+    The control is built from the variant that was actually sent, not from the
+    seed. When a filter refused the plain spelling, the response being judged came
+    from a rewritten one, and comparing it against an unrewritten control is
+    comparing a refusal page against the application's own error page - they
+    differ, and the difference has nothing to do with whether the file is there.
+    Whatever got through is what the control has to be made of.
+
     The comparison is made after each payload is removed from its own response.
     A page that reflects the parameter back is the normal case, and there the two
     responses differ by construction - they carry different payloads. Comparing
@@ -211,14 +218,31 @@ def _differs_from_missing(
     """
     if target == MISSING_PATH:
         return False
-    control = wrapper.payload.format(file=MISSING_PATH)
+    control = _same_spelling(wrapper, variant)
     outcome = _inject(ctx, param, control, "probe.read.control")
     if outcome is None:
         return False
     _, exchange = outcome
     if exchange.response.error:
         return False
-    return Judge.strip_echo(exchange.response.text, control) != Judge.strip_echo(seen, payload)
+    return Judge.strip_echo(exchange.response.text, control) != Judge.strip_echo(
+        seen, variant.value
+    )
+
+
+def _same_spelling(wrapper: Wrapper, variant) -> str:
+    """The payload this variant was, aimed at a path that is not there.
+
+    The rewrites are replayed in the order they were applied, so the control asks
+    the same question in the same spelling - which is the only way the two
+    responses are comparable.
+    """
+    value = wrapper.payload.format(file=MISSING_PATH)
+    for name in variant.mutators:
+        item = mutator(name)
+        if item is not None:
+            value = item.apply(value)
+    return value
 
 
 def _path_of(payload: str) -> str:
@@ -262,8 +286,24 @@ def _remembered_read(ctx: RunContext, path: str) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _has_read(ctx: RunContext, path: str) -> bool:
+    """Whether the file is known, which an empty file still is.
+
+    The value of a file that was read can be an empty string, and asking for the
+    value cannot tell that apart from never having asked. The fact's presence
+    can.
+    """
+    return bool(path) and ctx.blackboard.has(REMEMBERED_READ + path)
+
+
 def _remember_read(ctx: RunContext, path: str, content: str) -> None:
-    if path and content:
+    """Keep the file, including when it turned out to be empty.
+
+    An empty file is an answer - "there is nothing in it" - and skipping the
+    record for it left the operator with a run that reported the file as not read
+    when the read had worked perfectly.
+    """
+    if path:
         ctx.blackboard.set(
             REMEMBERED_READ + path,
             content,
@@ -277,7 +317,7 @@ def _remember_read(ctx: RunContext, path: str, content: str) -> None:
 _BASE64_RUN = re.compile(rb"[A-Za-z0-9+/]{4,}={0,2}")
 
 
-def _decoded_file(body: str) -> str:
+def _decoded_file(body: str) -> str | None:
     """The file, decoded the way the payload asked for it.
 
     A wrapper whose payload is `php://filter/convert.base64-encode` answers with
@@ -289,26 +329,36 @@ def _decoded_file(body: str) -> str:
     chosen for that is far too high for a file: measured, `/etc/hostname` came
     back as `NDg4YTA1NWI0ZTZjCg==`, twenty characters, and `--read` reported the
     file as not read while the response was carrying it.
+
+    Nor is there a printability test any more, for the same reason one step on: a
+    file can hold bytes that are not text, and a control character in it made the
+    whole read disappear. The wrapper said the answer is encoded, so a blob that
+    decoded is the file.
+
+    None means no blob decoded at all - nothing was read. An empty string means a
+    blob decoded to nothing, which is a file with nothing in it, and that is an
+    answer rather than a failure.
     """
     raw = body.encode("latin-1", "replace")
-    candidates: list[str] = []
+    decoded_blobs: list[bytes] = []
     for blob in _BASE64_RUN.findall(raw):
         try:
-            decoded = base64.b64decode(blob + b"=" * (-len(blob) % 4), validate=True)
+            decoded_blobs.append(base64.b64decode(blob + b"=" * (-len(blob) % 4), validate=True))
         except (binascii.Error, ValueError):
             continue
-        text = decoded.decode("utf-8", "replace")
-        if text and all(char.isprintable() or char in "\r\n\t" for char in text):
-            candidates.append(text)
-    if not candidates:
-        return ""
+    if not decoded_blobs:
+        return None
+    texts = [item.decode("utf-8", "replace") for item in decoded_blobs]
     # A reading that is not in the response had to be decoded to exist, which is
     # the file rather than a word of the page that happens to be valid base64.
-    fresh = [text for text in candidates if text not in body]
-    return max(fresh or candidates, key=len)
+    fresh = [text for text in texts if text and text not in body]
+    pool = fresh or [text for text in texts if text]
+    if not pool:
+        return ""
+    return max(pool, key=len)
 
 
-def _named_file_contents(wrapper: Wrapper, body: str, payload: str) -> str:
+def _named_file_contents(wrapper: Wrapper, body: str, payload: str) -> str | None:
     """The file itself, out of the page that carried it.
 
     A read that is proved and not shown is half a result: the operator asked for
@@ -316,6 +366,10 @@ def _named_file_contents(wrapper: Wrapper, body: str, payload: str) -> str:
     the same work decides what the file is - which is why the wrapper's own
     encoding is used rather than a second, differently-guessed decoding of the
     response.
+
+    None means nothing was decoded, and an empty string means a file with nothing
+    in it. The caller has to tell those apart: one is a read that did not happen,
+    the other is a read that answered.
 
     Only for a file the operator named. The probe's own reads are about whether a
     wrapper works, and printing the application's page at whoever ran it is noise.
@@ -334,7 +388,7 @@ def _named_file_contents(wrapper: Wrapper, body: str, payload: str) -> str:
     if decoded:
         return max(decoded, key=len)
     plain = [v for v in views if "<" not in v]
-    return max(plain, key=len) if plain else ""
+    return max(plain, key=len) if plain else None
 
 
 def _proven(
@@ -367,12 +421,14 @@ def _proven(
     # rather than from what it spent.
     if ctx.config.get("read") and body:
         shown = _named_file_contents(wrapper, body, variant.value)
-        if shown:
+        if shown is not None:
             path = _path_of(variant.value) or variant.value
             _remember_read(ctx, path, shown)
             # What was read, not what it said, and once. The file itself goes in
             # the result at the end, where the answer belongs - not once for
-            # every wrapper that turned out to reach it.
+            # every wrapper that turned out to reach it. An empty file still
+            # counts as read: it has an answer, and it is not an empty string in
+            # the report.
             ctx.announce(f"read.{path}", f"  [+] read {path}")
 
     # A file that was read says where files live, and whoever writes one next
@@ -420,8 +476,7 @@ def _try_wrapper(ctx: RunContext, param, wrapper: Wrapper, action: str, targets:
     # re-probed everything else on the way. Measured: twenty-eight requests for
     # an answer the session already held.
     for target in targets:
-        remembered = _remembered_read(ctx, target)
-        if remembered:
+        if _has_read(ctx, target):
             ctx.announce(
                 f"read.{target}", f"  [+] read {target} (resumed from an earlier run)"
             )
@@ -452,7 +507,7 @@ def _try_wrapper(ctx: RunContext, param, wrapper: Wrapper, action: str, targets:
             # No signature matched, but a file the operator named may simply have
             # contents no table could list. One control request separates "the
             # wrapper read it" from "the wrapper answered with the page".
-            if _differs_from_missing(ctx, param, wrapper, target, exchange.response.text, variant.value):
+            if _differs_from_missing(ctx, param, wrapper, target, exchange.response.text, variant):
                 verdict = Verdict(
                     confirmed=True,
                     confidence=Confidence.LIKELY,
@@ -463,7 +518,7 @@ def _try_wrapper(ctx: RunContext, param, wrapper: Wrapper, action: str, targets:
             continue
         _proven(ctx, wrapper, param, variant, request, verdict, body=exchange.response.text)
         answered = True
-        if target in asked and not all(_remembered_read(ctx, one) for one in asked):
+        if target in asked and not all(_has_read(ctx, one) for one in asked):
             # More named files to get. The wording of a "not read" line has to be
             # true, and stopping here would make it say a file was unreadable
             # when nobody asked for it yet.
@@ -903,7 +958,7 @@ def report_summary(ctx: RunContext) -> None:
     # off because the one path asked for happened to be unreadable; saying only
     # the first is how the operator never learns the file they came for is not
     # there.
-    missed = [path for path in (ctx.config.get("read") or []) if not _remembered_read(ctx, path)]
+    missed = [path for path in (ctx.config.get("read") or []) if not _has_read(ctx, path)]
     if missed:
         note = f"    not read: {', '.join(missed)}"
         if not proven:

@@ -100,7 +100,39 @@ class RoundTrip(unittest.TestCase):
         self.assertIsNotNone(session.load("https://example.test/x?a=2"))
 
 
-class SafeNames(unittest.TestCase):
+class ForgettingANamedFile(unittest.TestCase):
+    """`--flush-session` has to mean the same thing in both stores.
+
+    Merely declining to read the named file is not forgetting it: the run then
+    overwrites it at the end, so a clean slate and a truncation look identical,
+    and a run that dies half way leaves the previous facts on disk having said it
+    started fresh.
+    """
+
+    def _scratch(self, name: str) -> str:
+        directory = os.path.join(HERE, ".tmp")
+        os.makedirs(directory, exist_ok=True)
+        return os.path.join(directory, name)
+
+    def test_a_named_file_is_removed(self):
+        from injectorkit.engine.runner import forget_state_file
+
+        path = self._scratch("forget-me.json")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("{}")
+        try:
+            message = forget_state_file(path)
+            self.assertFalse(os.path.exists(path))
+            self.assertIn("removed", message)
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
+    def test_a_file_that_was_not_there_says_so(self):
+        from injectorkit.engine.runner import forget_state_file
+
+        message = forget_state_file(self._scratch("never-existed.json"))
+        self.assertIn("was not there", message)
     def test_a_host_keeps_its_dots(self):
         self.assertEqual(session._safe("example.test:8443"), "example.test_8443")
 

@@ -751,7 +751,14 @@ def _send_exploit(
     expect: tuple[str, ...] = (),
     show_between: tuple[str, str] = (),
     command: str = "",
-) -> None:
+) -> bool:
+    """Send one exploitation payload and say whether it can be believed.
+
+    True means there is evidence the payload did what it was for. The Redis chain
+    branches on that answer - a write nothing served means the guessed directory
+    was wrong and the next candidate is worth trying - so it is a predicate, and
+    a `-> None` annotation told the reader it was not.
+    """
     for param in _candidates(ctx):
         if ctx.stopped:
             return

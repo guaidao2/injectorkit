@@ -19,7 +19,13 @@ from types import SimpleNamespace
 from injectorkit.core.httpmsg import Headers, Request
 from injectorkit.core.params import Param, Where
 from injectorkit.engine.evidence import Judge
+from injectorkit.core.mutate import Variant
 from injectorkit.modules.proto.graph import MISSING_PATH, _differs_from_missing
+
+
+def as_variant(value: str) -> Variant:
+    """The function is handed the variant that was sent, not its value."""
+    return Variant(value=value, generation=0)
 from injectorkit.modules.proto.seeds import Wrapper
 
 
@@ -98,7 +104,7 @@ class WhatCountsAsReadingAnUnknownFile(unittest.TestCase):
         original = graph._inject
         graph._inject = inject
         try:
-            return _differs_from_missing(ctx, param, WRAPPER, "/flag", seen, payload)
+            return _differs_from_missing(ctx, param, WRAPPER, "/flag", seen, as_variant(payload))
         finally:
             graph._inject = original
 
@@ -119,7 +125,7 @@ class WhatCountsAsReadingAnUnknownFile(unittest.TestCase):
         graph._inject = inject
         try:
             differs = _differs_from_missing(
-                ctx, param, WRAPPER, "/flag", "<textarea>/flag</textarea>same page", "/flag"
+                ctx, param, WRAPPER, "/flag", "<textarea>/flag</textarea>same page", as_variant("/flag")
             )
         finally:
             graph._inject = original
@@ -134,7 +140,7 @@ class WhatCountsAsReadingAnUnknownFile(unittest.TestCase):
         graph._inject = inject
         try:
             differs = _differs_from_missing(
-                ctx, param, WRAPPER, "/flag", "<textarea>/flag</textarea>the app said no", "/flag"
+                ctx, param, WRAPPER, "/flag", "<textarea>/flag</textarea>the app said no", as_variant("/flag")
             )
         finally:
             graph._inject = original
@@ -152,7 +158,7 @@ class WhatCountsAsReadingAnUnknownFile(unittest.TestCase):
         original = graph._inject
         graph._inject = inject
         try:
-            _differs_from_missing(ctx, param, WRAPPER, "/flag", "b", "{file}")
+            _differs_from_missing(ctx, param, WRAPPER, "/flag", "b", as_variant("{file}"))
         finally:
             graph._inject = original
         self.assertIn(MISSING_PATH, ctx.sent[0])
@@ -169,7 +175,7 @@ class WhatCountsAsReadingAnUnknownFile(unittest.TestCase):
         original = graph._inject
         graph._inject = broken
         try:
-            self.assertFalse(_differs_from_missing(ctx, param, WRAPPER, "/flag", "x", "{file}"))
+            self.assertFalse(_differs_from_missing(ctx, param, WRAPPER, "/flag", "x", as_variant("{file}")))
         finally:
             graph._inject = original
 

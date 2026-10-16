@@ -16,7 +16,7 @@ LAB=/opt/injectorkit-lab
 PORT=8080
 # The PowerShell endpoint runs under its own server; see the note near the end.
 PS_PORT=8086
-REQUIRED_FILES=(www/index.php www/fetch.php www/include.php www/redirect.php internal.py javalab/ProtoLab.java)
+REQUIRED_FILES=(www/index.php www/fetch.php www/include.php www/redirect.php internal.py waf.py javalab/ProtoLab.java)
 
 for relative in "${REQUIRED_FILES[@]}"; do
     if [ ! -f "$LAB/$relative" ]; then
@@ -160,6 +160,20 @@ if command -v pwsh >/dev/null 2>&1; then
     sleep 1
 fi
 
+# The five signature profiles. They sit in front of the application rather than
+# being part of it, so nothing above starts them - and a rebooted Kali then
+# answers those scenarios as skips, which is not the same answer as a pass.
+# Started here so that "run the lab" means the whole lab.
+for profile_port in 8081 8082 8083 8084 8085; do
+    pkill -f "python3 .*waf.py $profile_port" 2>/dev/null || true
+done
+sleep 1
+for profile_port in 8081 8082 8083 8084 8085; do
+    setsid nohup python3 "$LAB/waf.py" "$profile_port" \
+        > "$LAB/logs/waf-$profile_port.log" 2>&1 &
+done
+sleep 1
+
 cat <<EOF
 
   web        http://<this-host>:$PORT/
@@ -169,6 +183,9 @@ cat <<EOF
   cmdi       http://<this-host>:$PORT/cmdi.php?cmd=<cmd>|host=<arg>|bash=<cmd>|safe=<arg>
   powershell http://<this-host>:$PS_PORT/cmdi.php?ps=<cmd>   (own server; see the note above)
   java       http://<this-host>:9100/fetch?url=<url>   (jar:, jrt:, netdoc:)
+  profiles   8081-8085, the five signature filters the waf group asks about
+             (8081 literal / 8082 spellings / 8083 semantic / 8084 whitelist /
+             8085 first value of each parameter)
 
   internal   redis 127.0.0.1:6379 (real)
              metadata 169.254.169.254:80, docker :2375, etcd :2379, kubelet :10255,
