@@ -36,6 +36,10 @@ def request_from_args(args, module: str) -> Request:
                 )
             scheme = parsed.scheme if parsed and parsed.scheme else "http"
             request.url = f"{scheme}://{host}{request.url}"
+        # Extra headers belong on a capture as much as on a URL, and they are one
+        # of the ways a header becomes injectable at all.
+        for name, value in parse_headers(args.header):
+            request.headers.set(name, value)
         return request
     if not args.url:
         raise SystemExit(f"{module} needs -u/--url (or -r for a raw request)")
@@ -52,11 +56,11 @@ def collect_targets(args, runtime, module: str) -> list[Request]:
 
     A URL is one target. `--forms` adds the requests the page itself declares,
     because the parameters behind a login box or a search field are not in the
-    address. `--batch` replaces the single target with a list, which is what
+    address. `--targets` replaces the single target with a list, which is what
     makes a set of hosts or a folder of captures one command.
     """
-    if getattr(args, "batch", None):
-        return requests_from_batch(args.batch)
+    if getattr(args, "targets", None):
+        return requests_from_batch(args.targets)
     request = request_from_args(args, module)
     targets = [request]
     if getattr(args, "forms", False):
@@ -111,14 +115,20 @@ def select_params(
     requested: str | None,
     max_params: int,
     likely: frozenset[str],
+    extra_headers: frozenset[str] = frozenset(),
 ) -> list[Param]:
     """Pick the parameters worth injecting into, best candidate first.
 
     A hundred requests into a parameter nobody reads is a hundred wasted
     requests, so when the operator did not name one, the names that usually
     carry a URL or a path go first and the rest are still there behind them.
+
+    `extra_headers` names the headers the operator passed with -H. A header
+    outside the usual set is exactly the case worth having: naming it is the
+    clearest statement that this application reads it, and a filter in front of
+    the application is the least likely to be looking at it.
     """
-    params = extract_params(request, skip=DEFAULT_SKIP, max_params=64)
+    params = extract_params(request, skip=DEFAULT_SKIP, max_params=64, extra_headers=extra_headers)
     if requested:
         return [param for param in params if param.key() == requested or param.name == requested]
     if len(params) <= 1:
@@ -143,9 +153,15 @@ def run_targets(args, runtime, module: str, likely: frozenset[str], handler) -> 
     if len(targets) > 1:
         runtime.info(f"targets: {len(targets)}")
 
+    # Whatever the operator passed with -H is injectable by name, above and
+    # beyond the headers an application is known to read.
+    extra_headers = frozenset(
+        name.lower() for name, _ in parse_headers(getattr(args, "header", None) or [])
+    )
+
     tested = 0
     for index, request in enumerate(targets, 1):
-        params = select_params(request, args.param, args.max_params, likely)
+        params = select_params(request, args.param, args.max_params, likely, extra_headers)
         if not params:
             runtime.info(f"  [{index}/{len(targets)}] no injectable parameter; skipped")
             continue
@@ -165,23 +181,23 @@ def run_targets(args, runtime, module: str, likely: frozenset[str], handler) -> 
 
 
 def open_board(args, runtime, request: Request) -> Blackboard:
-    """A board for this target, resumed from a session file when there is one."""
+    """A board for this target, resumed from a state file when there is one."""
     board = Blackboard(target=request.host())
-    if getattr(args, "session", None):
-        resumed = resume_session(args.session, board.target)
+    if getattr(args, "state", None):
+        resumed = resume_session(args.state, board.target)
         if resumed is not None:
             board = resumed
             runtime.info(
-                f"  session: {len(board.facts)} facts and {len(board.dead_ends)} closed paths "
-                f"carried over from {args.session}"
+                f"  state: {len(board.facts)} facts and {len(board.dead_ends)} closed paths "
+                f"carried over from {args.state}"
             )
     return board
 
 
 def close_board(args, board: Blackboard) -> None:
-    """Keep what was learned, when the operator asked for a session file."""
-    if getattr(args, "session", None):
-        board.save(args.session)
+    """Keep what was learned, when the operator asked for a state file."""
+    if getattr(args, "state", None):
+        board.save(args.state)
 
 
 def resume_session(path: str, target: str) -> Blackboard | None:

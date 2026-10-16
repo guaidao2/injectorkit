@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import sys
 from dataclasses import dataclass, field
 
@@ -63,6 +64,41 @@ class Runtime:
 from .core.httpmsg import parse_headers  # noqa: F401  (re-exported for callers that import it here)
 
 
+def credentials(args: argparse.Namespace) -> list[tuple[str, str]]:
+    """The identity every request carries, from the flags that describe one.
+
+    Three spellings for one idea, because they are not interchangeable in
+    practice: a cookie is what a browser session gives you, Basic is what a
+    staging environment in front of the application asks for, and a bare header
+    covers the rest - bearer tokens, API keys, a house authentication header.
+    Making the operator hand-encode one into another is just a way to get it
+    wrong.
+    """
+    pairs: list[tuple[str, str]] = []
+
+    for raw in getattr(args, "cookie", None) or []:
+        value = (raw or "").strip()
+        if not value:
+            continue
+        # A cookie pasted from a browser may still have the header name attached,
+        # which is the single most common way to get this wrong.
+        for prefix in ("Cookie:", "cookie:"):
+            if value.startswith(prefix):
+                value = value[len(prefix):].strip()
+        if value:
+            pairs.append(("Cookie", value))
+
+    if getattr(args, "basic_auth", None):
+        raw = args.basic_auth.strip()
+        user, found, password = raw.partition(":")
+        if not found:
+            raise SystemExit("--basic-auth expects USER:PASSWORD")
+        token = base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
+        pairs.append(("Authorization", f"Basic {token}"))
+
+    return pairs
+
+
 def build_transport(args: argparse.Namespace) -> Transport:
     return Transport(
         TransportOptions(
@@ -70,7 +106,7 @@ def build_transport(args: argparse.Namespace) -> Transport:
             insecure=not args.verify_tls,
             proxy=args.proxy,
             follow_redirects=args.follow_redirects,
-            headers=tuple(parse_headers(args.header)),
+            headers=tuple(credentials(args) + parse_headers(args.header)),
             user_agent=args.user_agent,
             random_user_agent=args.random_ua,
             delay=args.delay,

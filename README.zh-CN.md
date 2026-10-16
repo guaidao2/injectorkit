@@ -18,6 +18,20 @@
 
 Python 3.11 或更新。核心零第三方依赖，检出即可运行。经 interactsh 部署做带外测试需要 `cryptography`（安全工具环境通常已有）；没有它时，本地监听器仍然可用。
 
+## 登录之后
+
+把工具指向你已经登录的身份就行——不需要配置什么，也不需要它自己去登录：
+
+    python injectorkit.py ssrf -u "http://target/admin/export?file=x" \
+        -C "PHPSESSID=abc123; csrf=xyz" \
+        -H "Authorization: Bearer eyJhbGciOi..."
+
+- `-C/--cookie` 直接收浏览器里那样的 cookie 串；整行粘过来的 `Cookie: ...` 也照收不误。
+- `-H/--header` 管其余的——bearer token、API key、自家鉴权头。`-H` 指定的头同时也会成为可注入的位置，自定义鉴权头只有这样才测得到。
+- `--basic-auth USER:PASSWORD` 帮你编码。
+
+有两条规则是为了让它对活着的会话安全：cookie 与请求自带的**合并**而不是替换——否则请求里的 CSRF token 会被丢掉，正好把要保的会话搞掉；请求自己已经指定的头优先于命令行给的值，因为请求里的身份比一个默认值更具体。
+
 ## 用法
 
     python injectorkit.py -h
@@ -57,7 +71,7 @@ Python 3.11 或更新。核心零第三方依赖，检出即可运行。经 inte
 一个 URL 只能碰到 URL 里的参数，其余都在 body 里：
 
     --forms              抓取页面并提交它声明的每个表单，字段照页面声明填
-    --batch targets.txt  一行一个目标 —— 一个 URL，或者一个保存下来的原始报文路径
+    --targets targets.txt  一行一个目标 —— 一个 URL，或者一个保存下来的原始报文路径
 
 `--forms` 让登录页、搜索框、上传控件都能从单个地址开始测：请求按页面构造请求的方式构造（GET 字段进查询串、POST 字段进 body、上传表单发真正的 multipart），每个表单都成为独立目标。
 

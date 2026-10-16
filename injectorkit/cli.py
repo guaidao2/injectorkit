@@ -27,7 +27,29 @@ MODULES = {
 def add_engine_flags(parser: argparse.ArgumentParser) -> None:
     group = parser.add_argument_group("request")
     group.add_argument("-X", "--method", default="GET", help="HTTP method for the target request")
-    group.add_argument("-H", "--header", action="append", metavar="NAME: VALUE", help="extra header (repeatable)")
+    group.add_argument(
+        "-H",
+        "--header",
+        action="append",
+        metavar="NAME: VALUE",
+        help="extra header (repeatable). One the request already carries wins, because a request "
+        "that names its own identity is more specific than a command-line default",
+    )
+    group.add_argument(
+        "-C",
+        "--cookie",
+        action="append",
+        metavar="NAME=VALUE",
+        help="a session cookie to send with every request (repeatable). 'a=b; c=d' works, and a "
+        "pasted 'Cookie: a=b' is accepted as it comes. Merged with whatever the request already "
+        "carries rather than replacing it - dropping the request's own CSRF token would end the "
+        "session this exists to keep",
+    )
+    group.add_argument(
+        "--basic-auth",
+        metavar="USER:PASSWORD",
+        help="HTTP Basic credentials, encoded for you",
+    )
     group.add_argument("--data", help="request body")
 
     engine = parser.add_argument_group("engine")
@@ -61,7 +83,29 @@ def add_engine_flags(parser: argparse.ArgumentParser) -> None:
         metavar="FILE",
         help="where those priors are kept between runs",
     )
-    engine.add_argument("--session", metavar="FILE", help="save progress here and resume from it")
+    engine.add_argument(
+        "--state",
+        metavar="FILE",
+        help="save progress here and resume from it (scan state, not an authenticated session)",
+    )
+    engine.add_argument(
+        "--forms",
+        action="store_true",
+        help="fetch the page and submit every form it declares, so parameters that live in a form "
+        "body rather than the URL are tested too",
+    )
+    engine.add_argument(
+        "--targets",
+        metavar="FILE",
+        help="test many targets from one file: a URL, or the path of a saved raw request, per line",
+    )
+    engine.add_argument(
+        "--batch",
+        action="store_true",
+        help="never ask, take the default answer everywhere. Nothing prompts today, so this changes "
+        "nothing yet - it is here because whether to ask is one decision for every class, not a "
+        "decision each class makes for itself",
+    )
     engine.add_argument("-v", "--verbose", action="count", default=0, help="-v shows traffic, -vv shows tracebacks")
     engine.add_argument("-q", "--quiet", action="store_true", help="print results only")
     engine.add_argument(

@@ -57,17 +57,6 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="route every payload through a host the target trusts, with {target} standing for the "
         "real value, e.g. 'http://allowed/redirect?to={target}'",
     )
-    parser.add_argument(
-        "--forms",
-        action="store_true",
-        help="fetch the page and submit every form it declares, so parameters in a form body are tested too",
-    )
-    parser.add_argument(
-        "--batch",
-        metavar="FILE",
-        help="test many targets from one file: a URL, or a path to a saved raw request, per line",
-    )
-
     exploit = parser.add_argument_group("exploitation")
     exploit.add_argument(
         "--exploit",

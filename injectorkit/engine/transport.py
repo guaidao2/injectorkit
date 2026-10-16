@@ -82,9 +82,28 @@ class Transport:
         self._opener = urllib.request.build_opener(*handlers)
 
     def send(self, request: Request) -> Response:
-        headers = Headers(self.options.headers)
+        headers = Headers()
         for name, value in request.headers:
             headers.set(name, value)
+
+        # The configured identity goes on top, with two rules that matter. A
+        # cookie is merged rather than replaced: a request may carry its own -
+        # a CSRF token, a consent flag - and dropping them would end the very
+        # session this exists to keep. Every other header only fills a gap,
+        # because a request that already names an identity is more specific
+        # than a command-line default, and overriding it would be the one thing
+        # that must never happen to an authenticated request.
+        for name, value in self.options.headers:
+            if not name or not value:
+                # A stray empty argument - an unset shell variable, a typo -
+                # should not turn into a header on the wire.
+                continue
+            if name.lower() == "cookie":
+                existing = headers.get("Cookie") or ""
+                headers.set("Cookie", f"{existing}; {value}" if existing else value)
+            elif not headers.get(name):
+                headers.set(name, value)
+
         headers.set("User-Agent", self._user_agent(headers))
         headers.set("Accept", "*/*")
         headers.set("Connection", "close")

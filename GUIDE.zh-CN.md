@@ -50,7 +50,7 @@ Python 3.11 或更新。核心部分不需要装任何东西。只有通过 inte
 
 ### 一次打一批
 
-    python injectorkit.py ssrf --batch targets.txt
+    python injectorkit.py ssrf --targets targets.txt
 
 一行一个目标：一个 URL，或者一个保存下来的报文文件路径。空行和 `#` 注释会跳过。每个目标依次跑，共用同一套引擎选项。
 
@@ -263,9 +263,9 @@ PHP-FPM 链，用在应答了的 FastCGI 监听上。它发一对真正的 FastC
 
 ### 一个目标的进度
 
-    --session s.json
+    --state s.json
 
-把学到的东西存下来，下次接着用。恢复后的运行会跳过已经关掉的路，而不是重新推一遍：
+把学到的东西存下来，下次接着用。恢复后的运行会跳过已经关掉的路，而不是重新推一遍。这是**扫描进度**，不是登录会话——登录身份用 `-C` 和 `-H`：
 
     第一次      requests sent: 14
     第二次      session: 22 facts and 2 closed paths carried over
@@ -354,11 +354,11 @@ PHP-FPM 链，用在应答了的 FastCGI 监听上。它发一对真正的 FastC
 
 **一批主机，安静点**
 
-    python injectorkit.py ssrf --batch hosts.txt -q --oob-interactsh oast.pro
+    python injectorkit.py ssrf --targets hosts.txt -q --oob-interactsh oast.pro
 
 **明天接着打**
 
-    python injectorkit.py ssrf -u "http://target/fetch?url=x" --session target.json
+    python injectorkit.py ssrf -u "http://target/fetch?url=x" --state target.json
 
 ## 排错
 

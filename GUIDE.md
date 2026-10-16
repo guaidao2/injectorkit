@@ -61,7 +61,7 @@ binary body survives the trip.
 
 ### Many targets at once
 
-    python injectorkit.py ssrf --batch targets.txt
+    python injectorkit.py ssrf --targets targets.txt
 
 One target per line: a URL, or the path of a saved request file. Blank lines and
 `#` comments are ignored. Each target is tested in turn against the same engine
@@ -351,10 +351,11 @@ back toward neutral - the file corrects itself rather than going stale.
 
 ### One target's progress
 
-    --session s.json
+    --state s.json
 
 Saves what was learned and picks it up next time. A resumed run skips the closed
-paths instead of re-deriving them:
+paths instead of re-deriving them. This is scan state, not an authenticated
+session - that is `-C` and `-H`:
 
     first run   requests sent: 14
     second run  session: 22 facts and 2 closed paths carried over
@@ -455,11 +456,11 @@ output for `[!]` or parse the board:
 
 **A list of hosts, quietly**
 
-    python injectorkit.py ssrf --batch hosts.txt -q --oob-interactsh oast.pro
+    python injectorkit.py ssrf --targets hosts.txt -q --oob-interactsh oast.pro
 
 **Come back to it tomorrow**
 
-    python injectorkit.py ssrf -u "http://target/fetch?url=x" --session target.json
+    python injectorkit.py ssrf -u "http://target/fetch?url=x" --state target.json
 
 ## Troubleshooting
 

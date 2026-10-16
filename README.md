@@ -32,6 +32,38 @@ callback listener, which needs nothing.
 
     pip install -e .          # optional: get an `injectorkit` command on PATH
 
+## Tests
+
+    python -m unittest discover -s tests -t .
+
+Offline: no target, no network, no PHP, and nothing to install. They cover the
+layers the modules are built on - message parsing, parameter placement, mutation
+generations, evidence judging, the board, the priors, protocol bytes, the filter
+chain's size, and the output rules - so a change to the engine can be checked
+without a lab. Anything that needs a live target lives in `lab/` instead.
+
+## Behind a login
+
+Point the tool at the identity you are already logged in as. There is nothing to
+configure and nothing for it to log in to:
+
+    python injectorkit.py ssrf -u "http://target/admin/export?file=x" \
+        -C "PHPSESSID=abc123; csrf=xyz" \
+        -H "Authorization: Bearer eyJhbGciOi..."
+
+- `-C/--cookie` takes the cookie string as a browser shows it, and a pasted
+  `Cookie: ...` line is accepted exactly as it comes.
+- `-H/--header` carries anything else - a bearer token, an API key, a house
+  authentication header. `-H` also makes a header injectable, which is how a
+  custom authentication header becomes a position worth testing at all.
+- `--basic-auth USER:PASSWORD` encodes it for you.
+
+Two rules make this safe against a live session. A cookie is **merged** with
+whatever the request already carries rather than replacing it - a CSRF token in
+the request would otherwise be dropped, ending the very session this exists to
+keep. And a header the request already names wins over the command-line value,
+because a request that names its own identity is more specific than a default.
+
 ## Usage
 
     python injectorkit.py -h
@@ -109,7 +141,7 @@ body somewhere:
 
     --forms              fetch the page and submit every form it declares, with
                          the fields the page declares
-    --batch targets.txt  one target per line - a URL, or the path of a saved raw
+    --targets targets.txt  one target per line - a URL, or the path of a saved raw
                          request
 
 `--forms` is what makes a login page, a search box or an upload widget testable

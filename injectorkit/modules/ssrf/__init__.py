@@ -53,17 +53,6 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     exploit.add_argument("--fpm-port", type=int, default=9000, help="PHP-FPM port (default: 9000)")
 
     parser.add_argument(
-        "--forms",
-        action="store_true",
-        help="fetch the page and submit every form it declares, so parameters that live in a form "
-        "body - not in the URL - are tested too",
-    )
-    parser.add_argument(
-        "--batch",
-        metavar="FILE",
-        help="test many targets from one file: a URL, or a path to a saved raw request, per line",
-    )
-    parser.add_argument(
         "--rebind",
         metavar="INTERNAL,EXTERNAL",
         help="try each destination again under a DNS name that alternates between an internal "
@@ -109,13 +98,13 @@ def run(args: argparse.Namespace, runtime) -> int:
 
 def run_one(request: Request, params: list[Param], args: argparse.Namespace, runtime) -> None:
     blackboard = Blackboard(target=request.host())
-    if args.session:
-        resumed = resume_session(args.session, blackboard.target)
+    if args.state:
+        resumed = resume_session(args.state, blackboard.target)
         if resumed is not None:
             blackboard = resumed
             runtime.info(
-                f"  session: {len(blackboard.facts)} facts and {len(blackboard.dead_ends)} closed "
-                f"paths carried over from {args.session}"
+                f"  state: {len(blackboard.facts)} facts and {len(blackboard.dead_ends)} closed "
+                f"paths carried over from {args.state}"
             )
     context = RunContext(
         graph=build_graph(NAME),
@@ -147,5 +136,5 @@ def run_one(request: Request, params: list[Param], args: argparse.Namespace, run
     Engine(context.graph, context).run()
     runtime.emit("")
     runtime.emit(blackboard.render())
-    if args.session:
-        blackboard.save(args.session)
+    if args.state:
+        blackboard.save(args.state)

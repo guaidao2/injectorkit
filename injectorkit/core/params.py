@@ -34,6 +34,32 @@ DEFAULT_SKIP = (
 )
 
 
+# Headers an application is likely to read as input rather than as transport -
+# the ones that decide who the caller is, or where the request came from. A
+# header outside this list still gets injected when the operator names it with
+# -H: saying "this one" is a clearer statement than any default.
+INJECTABLE_HEADERS = frozenset(
+    {
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "x-forwarded-proto",
+        "x-real-ip",
+        "x-originating-ip",
+        "x-client-ip",
+        "client-ip",
+        "forwarded",
+        "referer",
+        "origin",
+        "authorization",
+        "x-auth-token",
+        "x-api-key",
+        "x-original-url",
+        "x-rewrite-url",
+        "x-http-method-override",
+    }
+)
+
+
 class Where(str, Enum):
     """Where in a request a value lives."""
 
@@ -113,8 +139,13 @@ def extract_params(
     request: Request,
     skip: tuple[str, ...] = DEFAULT_SKIP,
     max_params: int = 32,
+    extra_headers: frozenset[str] = frozenset(),
 ) -> list[Param]:
-    """List the injectable positions of a request, in a stable order."""
+    """List the injectable positions of a request, in a stable order.
+
+    `extra_headers` are header names to treat as injectable in addition to the
+    usual set - what the operator named with -H.
+    """
     params: list[Param] = []
     skipped = {name.lower() for name in skip}
 
@@ -122,6 +153,11 @@ def extract_params(
         if name.lower() in skipped:
             continue
         params.append(Param(where=where, name=name, value=value, occurrence=occurrence))
+
+    for where, name, value, occurrence in _header_pairs(request, extra_headers):
+        if name.lower() in skipped:
+            continue
+        params.append(Param(where=where, name=name, value=value, occurrence=occurrence, header=name))
 
     for where, name, value, occurrence in _body_pairs(request):
         if name.lower() in skipped:
@@ -151,7 +187,7 @@ def extract_params(
 
 def extract_named(request: Request, key: str) -> Param | None:
     """Find one parameter by its key, as printed by :meth:`Param.describe`."""
-    for param in extract_params(request, skip=()):
+    for param in extract_params(request, skip=(), extra_headers=frozenset({"*"})):
         if param.key() == key or param.name == key:
             return param
     return None
@@ -215,6 +251,25 @@ def rewrite_name(request: Request, param: Param, name: str, value: str, encode: 
 def _query_pairs(url: str) -> list[tuple[Where, str, str, int]]:
     _, query, _ = split_url(url)
     return _pairs(query, Where.QUERY, "&")
+
+
+def _header_pairs(
+    request: Request, extra: frozenset[str] = frozenset()
+) -> list[tuple[Where, str, str, int]]:
+    """Headers worth injecting into, by name.
+
+    Not every header: rewriting Accept-Encoding tells nobody anything and costs a
+    request. This is the set an application is likely to read as input rather
+    than as transport - the ones that decide who the caller is, or where the
+    request came from - plus any name in `extra`, which is what the operator
+    passed with -H. A house authentication header is the case that matters:
+    naming it is the only way the tool can know the application reads it.
+    """
+    out: list[tuple[Where, str, str, int]] = []
+    for name, value in request.headers.items():
+        if name.lower() in INJECTABLE_HEADERS or name.lower() in extra:
+            out.append((Where.HEADER, name, value, 0))
+    return out
 
 
 def _body_pairs(request: Request) -> list[tuple[Where, str, str, int]]:
@@ -301,6 +356,14 @@ def pollute(request: Request, param: Param, value: str, encode: Encode = Encode.
         header = out.headers.get("Cookie", "") or ""
         joined = f"{header}; {param.name}={encoded}" if header else f"{param.name}={encoded}"
         out.headers.set("Cookie", joined)
+    elif param.where is Where.HEADER:
+        # A second occurrence of the same header, the original left in place. A
+        # filter reading the first value and a framework keeping the last are
+        # looking at different strings out of one request - the same disagreement
+        # as a duplicated query parameter, in a place fewer filters watch.
+        out.headers.add(param.header, encoded)
+    else:
+        return out
 
     return out
 
