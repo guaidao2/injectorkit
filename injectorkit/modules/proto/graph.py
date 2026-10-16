@@ -150,7 +150,9 @@ def _try_wrapper(ctx: RunContext, param, wrapper: Wrapper, action: str, targets:
         request, exchange, variant = outcome
         if exchange.response.error:
             continue
-        verdict = ctx.judge.signature(exchange.response, wrapper.signatures, variant.value)
+        verdict = ctx.judge.signature(
+            exchange.response, wrapper.signatures, variant.value, param.value
+        )
         if not verdict.confirmed:
             continue
         _proven(ctx, wrapper, param, variant, request, verdict)
@@ -245,7 +247,9 @@ def probe_archive(ctx: RunContext) -> None:
             request, exchange, variant = outcome
             if exchange.response.error:
                 continue
-            verdict = ctx.judge.signature(exchange.response, wrapper.signatures, variant.value)
+            verdict = ctx.judge.signature(
+                exchange.response, wrapper.signatures, variant.value, param.value
+            )
             if not verdict.confirmed:
                 continue
             _proven(ctx, wrapper, param, variant, request, verdict)
@@ -388,9 +392,9 @@ def report_summary(ctx: RunContext) -> None:
 
     if proven:
         runtime = ctx.blackboard.get(RUNTIME) or "unknown"
-        ctx.emit(f"  result: the parameter accepts pseudo-protocol wrappers ({runtime})")
+        ctx.emit(f"[+] result: the parameter accepts pseudo-protocol wrappers ({runtime})")
     else:
-        ctx.emit("  result: no wrapper produced evidence on this target")
+        ctx.emit("[-] result: no wrapper produced evidence on this target")
 
     if refusals:
         ctx.emit(f"  filter: {refusals} requests were refused")

@@ -74,6 +74,11 @@ class Where(str, Enum):
     JSON_EMBED = "json-embed"
     # One part of a multipart/form-data body.
     MULTIPART = "multipart"
+    # The filename a multipart part declares. A part that carries a file is
+    # addressed twice: by its field name, which is the value the application
+    # reads, and by this, which is the name the file will be stored under. Only
+    # the second one reaches a path, so it is a position of its own.
+    MULTIPART_FILENAME = "multipart-filename"
 
 
 class Encode(str, Enum):
@@ -511,6 +516,18 @@ def _part_name(part: bytes) -> str | None:
     return None
 
 
+def _part_filename(part: bytes) -> str | None:
+    """The filename a part declares, if it declares one."""
+    head, _, _ = part.partition(b"\r\n\r\n")
+    for line in head.split(b"\r\n"):
+        if line.lower().startswith(b"content-disposition:"):
+            for piece in line.decode("latin-1").split(";"):
+                piece = piece.strip()
+                if piece.lower().startswith("filename="):
+                    return piece[len("filename="):].strip().strip('"')
+    return None
+
+
 def _part_value(part: bytes) -> bytes:
     _, separator, content = part.partition(b"\r\n\r\n")
     if not separator:
@@ -519,11 +536,12 @@ def _part_value(part: bytes) -> bytes:
 
 
 def _multipart_pairs(request: Request) -> list[tuple[Where, str, str, int]]:
-    """Every text part of a multipart body, addressed by its field name.
+    """Every part of a multipart body: its field value, and its filename.
 
     An upload form hands one of its fields to the application just like a query
     parameter does, and a scanner that only reads `application/x-www-form-urlencoded`
-    bodies never sees it.
+    bodies never sees it. A part carrying a file has a second value worth having:
+    the name the file is stored under.
     """
     boundary = _multipart_boundary(request)
     if not boundary or not request.body:
@@ -534,15 +552,31 @@ def _multipart_pairs(request: Request) -> list[tuple[Where, str, str, int]]:
         name = _part_name(part)
         if name is None:
             continue
-        value = _part_value(part).decode("latin-1")
         occurrence = seen.get(name, 0)
         seen[name] = occurrence + 1
-        out.append((Where.MULTIPART, name, value, occurrence))
+        out.append((Where.MULTIPART, name, _part_value(part).decode("latin-1"), occurrence))
+        filename = _part_filename(part)
+        if filename is not None:
+            out.append((Where.MULTIPART_FILENAME, name, filename, occurrence))
     return out
 
 
+def _replace_part_filename(head: bytes, new_name: str) -> bytes:
+    """Rewrite the filename in a part's Content-Disposition, keeping the rest."""
+    lines = head.split(b"\r\n")
+    for index, line in enumerate(lines):
+        if not line.lower().startswith(b"content-disposition:"):
+            continue
+        pieces = line.decode("latin-1").split(";")
+        for position, piece in enumerate(pieces):
+            if piece.strip().lower().startswith("filename="):
+                pieces[position] = f' filename="{new_name}"'
+        lines[index] = ";".join(pieces).encode("latin-1")
+    return b"\r\n".join(lines)
+
+
 def _rewrite_multipart(request: Request, param: Param, new_value: str) -> None:
-    """Replace the content of one part, leaving the rest of the body alone."""
+    """Replace the filename or the content of one part, leaving the rest alone."""
     boundary = _multipart_boundary(request)
     if not boundary:
         return
@@ -557,7 +591,10 @@ def _rewrite_multipart(request: Request, param: Param, new_value: str) -> None:
             head, separator, content = part.partition(b"\r\n\r\n")
             if not separator:
                 return
-            chunks[index] = head + separator + new_value.encode("latin-1") + b"\r\n"
+            if param.where is Where.MULTIPART_FILENAME:
+                chunks[index] = _replace_part_filename(head, new_value) + separator + content
+            else:
+                chunks[index] = head + separator + new_value.encode("latin-1") + b"\r\n"
             request.body = marker.join(chunks)
             request.headers.set("Content-Length", str(len(request.body)))
             return

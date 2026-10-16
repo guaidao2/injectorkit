@@ -86,16 +86,31 @@ def requests_from_batch(path: str) -> list[Request]:
     return targets
 
 
+def baseline_body(transport, request: Request) -> bytes | None:
+    """The page's own answer, with nothing injected into it.
+
+    A page that already prints "root:x:0:0" in a code sample answers every probe
+    with it, and a judge that only looks at the probe calls that a finding. The
+    response this same request produces untouched is what tells a result apart
+    from the page's own content - so it is fetched once per target and handed to
+    the judge, rather than guessed at inside it.
+    """
+    response = transport.send(request)
+    return None if response.error else response.body
+
+
 def requests_from_forms(request: Request, runtime) -> list[Request]:
     """Fetch the page once and turn every form it declares into a target."""
     response = runtime.transport.send(request)
     if response.error or not response.body:
-        runtime.info(f"  --forms: {request.url} could not be fetched ({response.error or 'empty body'})")
+        runtime.warn(
+            f"could not read the page to look for forms: {response.error or 'the body was empty'}"
+        )
         return []
 
     forms = parse_forms(response.text, request.url)
     if not forms:
-        runtime.info("  --forms: the page declares no form")
+        runtime.info("the page declares no form")
         return []
 
     targets: list[Request] = []
@@ -105,7 +120,7 @@ def requests_from_forms(request: Request, runtime) -> list[Request]:
             # A form with nothing in it is the page itself; testing it again
             # would only repeat the request that found it.
             continue
-        runtime.info(f"  --forms: {form.describe()}")
+        runtime.info(f"found a form: {form.describe()}")
         targets.append(built)
     return targets
 
@@ -140,6 +155,55 @@ def select_params(
     return ranked[:max_params]
 
 
+def choose_target(
+    targets: list[Request],
+    requested: str | None,
+    max_params: int,
+    likely: frozenset[str],
+    extra_headers: frozenset[str] = frozenset(),
+):
+    """The first target that actually has something to inject into.
+
+    `--forms` adds the page itself alongside the request its form would send, and
+    the page is usually first and has no parameters at all. Taking targets[0]
+    without looking is how a scan reports "nothing injectable" on a page whose
+    form is injectable one entry later.
+
+    Returns the request, its parameters, and its one-based position.
+    """
+    for index, request in enumerate(targets, 1):
+        params = select_params(request, requested, max_params, likely, extra_headers)
+        if params:
+            return request, params, index
+    return (targets[0] if targets else None), [], 0
+
+
+def no_parameters_message(
+    targets: list[Request],
+    max_params: int,
+    likely: frozenset[str],
+    extra_headers: frozenset[str] = frozenset(),
+) -> str:
+    """What to say when nothing anywhere turned out to hold a parameter.
+
+    The useful part is what was looked at and what each entry held. A list where
+    the second target carries a body parameter and the first carries nothing
+    explains the outcome in a way that "no injectable parameter" cannot - and
+    when every entry really is empty, that is worth knowing too.
+    """
+    lines = ["no injectable parameters were found. targets checked:"]
+    for request in targets:
+        found = extract_params(
+            request, skip=DEFAULT_SKIP, max_params=max_params, extra_headers=extra_headers
+        )
+        held = ", ".join(param.key() for param in found) or "no parameters"
+        lines.append(f"    {request.describe()}")
+        lines.append(f"        {held}")
+    lines.append("pass --param <name> to name one yourself; keys look like query:<name>,")
+    lines.append("body:<name>, cookie:<name>, multipart:<name>, json:user.avatar")
+    return "\n".join(lines)
+
+
 def run_targets(args, runtime, module: str, likely: frozenset[str], handler) -> int:
     """Walk every target, hand each one's parameters to the module, and report.
 
@@ -151,7 +215,7 @@ def run_targets(args, runtime, module: str, likely: frozenset[str], handler) -> 
     """
     targets = collect_targets(args, runtime, module)
     if len(targets) > 1:
-        runtime.info(f"targets: {len(targets)}")
+        runtime.info(f"testing {len(targets)} targets")
 
     # Whatever the operator passed with -H is injectable by name, above and
     # beyond the headers an application is known to read.
@@ -163,19 +227,16 @@ def run_targets(args, runtime, module: str, likely: frozenset[str], handler) -> 
     for index, request in enumerate(targets, 1):
         params = select_params(request, args.param, args.max_params, likely, extra_headers)
         if not params:
-            runtime.info(f"  [{index}/{len(targets)}] no injectable parameter; skipped")
+            runtime.info(f"target {index} of {len(targets)} has no parameters; moving on")
             continue
         if len(targets) > 1:
-            runtime.info("")
-            runtime.info(f"=== [{index}/{len(targets)}] {request.describe()} ===")
+            runtime.info(f"target {index} of {len(targets)}: {request.describe()}")
         handler(request, params, args, runtime)
         tested += 1
 
     if tested == 0:
         raise SystemExit(
-            "no injectable parameter found; name one with --param (parameter keys look like "
-            "query:<name>, body:<name>, cookie:<name>, multipart:<name>, json:user.avatar, "
-            "or 'json -> <field>')"
+            no_parameters_message(targets, args.max_params, likely, extra_headers)
         )
     return 0
 

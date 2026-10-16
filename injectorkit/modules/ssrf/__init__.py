@@ -17,7 +17,7 @@ from ...core.protocols import rebind_host
 from ...engine.blackboard import Blackboard
 from ...engine.bypass import Bypass
 from ...engine.evidence import Judge
-from ...engine.runner import collect_targets, resume_session, select_params
+from ...engine.runner import baseline_body, collect_targets, resume_session, select_params
 from ...engine.statemachine import Engine, RunContext
 from . import mutators as _mutators  # noqa: F401  (registers this module's mutators)
 from .graph import build_graph
@@ -74,7 +74,7 @@ def _rebind_name(value: str | None) -> str:
 def run(args: argparse.Namespace, runtime) -> int:
     targets = collect_targets(args, runtime, NAME)
     if len(targets) > 1:
-        runtime.info(f"targets: {len(targets)}")
+        runtime.info(f"testing {len(targets)} targets")
 
     tested = 0
     for index, request in enumerate(targets, 1):
@@ -110,7 +110,7 @@ def run_one(request: Request, params: list[Param], args: argparse.Namespace, run
         graph=build_graph(NAME),
         transport=runtime.transport,
         blackboard=blackboard,
-        judge=Judge(),
+        judge=Judge(baseline=baseline_body(runtime.transport, request)),
         bypass=Bypass(blackboard, enabled=not args.no_bypass),
         oob=runtime.oob,
         pheromone=runtime.pheromone,

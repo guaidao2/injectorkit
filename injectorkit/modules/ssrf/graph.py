@@ -81,7 +81,9 @@ def _try_probes(ctx: RunContext, probes, action: str, family: str) -> bool:
                 request, exchange, variant = outcome
                 if exchange.response.error:
                     continue
-                verdict = ctx.judge.signature(exchange.response, probe.signatures, variant.value)
+                verdict = ctx.judge.signature(
+                    exchange.response, probe.signatures, variant.value, param.value
+                )
                 if not verdict.confirmed:
                     continue
                 found = True
@@ -211,7 +213,9 @@ def probe_metadata_headers(ctx: RunContext) -> None:
             if outcome is None or ctx.stopped:
                 continue
             request, exchange, variant = outcome
-            verdict = ctx.judge.signature(exchange.response, probe.signatures, variant.value)
+            verdict = ctx.judge.signature(
+                exchange.response, probe.signatures, variant.value, param.value
+            )
             if not verdict.confirmed:
                 continue
             _note_finding(
@@ -273,7 +277,9 @@ def probe_split(ctx: RunContext) -> None:
         exchange = ctx.send(request, action="probe.split")
         if exchange.response.error:
             continue
-        verdict = ctx.judge.signature(exchange.response, signatures, path_value)
+        verdict = ctx.judge.signature(
+            exchange.response, signatures, path_value, path_param.value
+        )
         if not verdict.confirmed:
             continue
         ctx.blackboard.set(
@@ -427,7 +433,9 @@ def scheme_matrix(ctx: RunContext) -> None:
             if outcome is None:
                 continue
             _, exchange, _ = outcome
-            if ctx.judge.signature(exchange.response, signatures, payload).confirmed:
+            if ctx.judge.signature(
+                exchange.response, signatures, payload, param.value
+            ).confirmed:
                 _record(ctx, SCHEMES, name, evidence=f"{name} reached a service through {param.key()}", confidence=Confidence.CONFIRMED)
                 seen.add(name)
                 break
@@ -448,7 +456,9 @@ def fingerprint_services(ctx: RunContext) -> None:
             if outcome is None:
                 continue
             request, exchange, variant = outcome
-            verdict = ctx.judge.signature(exchange.response, probe.signatures, variant.value)
+            verdict = ctx.judge.signature(
+                exchange.response, probe.signatures, variant.value, param.value
+            )
             if not verdict.confirmed:
                 continue
             if ctx.pheromone is not None:
@@ -670,9 +680,11 @@ def confirm_execution(ctx: RunContext) -> None:
 
     proven = ctx.blackboard.get("ssrf.exploitable")
     if proven:
-        ctx.emit("  result: the fetch primitive reaches " + ", ".join(str(item) for item in proven))
+        ctx.emit(
+            "[+] result: the fetch primitive reaches " + ", ".join(str(item) for item in proven)
+        )
     else:
-        ctx.emit("  result: no exploitable internal service was confirmed")
+        ctx.emit("[-] result: no exploitable internal service was confirmed")
 
     # Silence and refusal look the same from outside, so say which one this was.
     refusals = ctx.bypass.refusals()

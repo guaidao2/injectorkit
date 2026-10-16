@@ -118,5 +118,71 @@ class PayloadStripping(unittest.TestCase):
         self.assertTrue(any("<?php" in view for view in views), views)
 
 
+class WhatThePageAlreadySays(unittest.TestCase):
+    """A signature the page prints for its own reasons is not a result.
+
+    A page that shows a passwd sample, a documentation line, or an error message
+    the application always emits answers every probe with the same string. The
+    baseline is the only thing that tells the two apart, and without it every
+    one of those pages reports as exploited.
+    """
+
+    PAGE = b"<html><p>a sample line: root:x:0:0</p></html>"
+
+    def test_a_signature_the_page_already_prints_is_not_a_finding(self):
+        judge = Judge(baseline=self.PAGE)
+        self.assertFalse(judge.signature(response(self.PAGE), ("root:x:0:0",)).confirmed)
+
+    def test_the_same_page_without_a_baseline_does_look_like_a_finding(self):
+        # Which is exactly why the baseline has to be fetched rather than assumed.
+        self.assertTrue(Judge().signature(response(self.PAGE), ("root:x:0:0",)).confirmed)
+
+    def test_a_signature_the_page_does_not_print_still_counts(self):
+        judge = Judge(baseline=b"<html>nothing of the sort here</html>")
+        self.assertTrue(judge.signature(response(b"<html>root:x:0:0</html>"), ("root:x:0:0",)).confirmed)
+
+    def test_the_baseline_is_matched_case_insensitively(self):
+        judge = Judge(baseline=b"<html>ROOT:X:0:0</html>")
+        self.assertFalse(judge.signature(response(self.PAGE), ("root:x:0:0",)).confirmed)
+
+    def test_an_empty_baseline_blocks_nothing(self):
+        self.assertTrue(Judge(baseline=b"").signature(response(self.PAGE), ("root:x:0:0",)).confirmed)
+
+
+class AnEchoIsRestoredNotJustRemoved(unittest.TestCase):
+    """Taking the payload out is not the same as putting the value back.
+
+    A page that prints the parameter back shows the payload where the original
+    value used to be. Removing the payload leaves that spot empty, so the
+    response still differs from the baseline and a comparison reads it as a
+    change the target made. Substituting the original value back makes the echo
+    read as the page did before anything was sent.
+    """
+
+    PAGE = "welcome, hunter2"
+
+    def test_the_original_value_comes_back(self):
+        self.assertEqual(Judge.restore_echo("welcome, PAY", "PAY", "hunter2"), self.PAGE)
+
+    def test_removing_instead_leaves_a_hole(self):
+        self.assertNotEqual(Judge.strip_echo("welcome, PAY", "PAY"), self.PAGE)
+
+    def test_a_percent_encoded_echo_is_restored_too(self):
+        self.assertEqual(Judge.restore_echo("q=PAY%2Fx", "PAY/x", "v"), "q=v")
+
+    def test_without_a_payload_nothing_changes(self):
+        self.assertEqual(Judge.restore_echo("plain", "", "x"), "plain")
+
+    def test_without_an_original_the_echo_is_removed(self):
+        self.assertEqual(Judge.restore_echo("a PA b", "PA", ""), "a  b")
+
+    def test_the_longest_spelling_is_replaced_first(self):
+        # A short spelling must not consume part of a longer one, the same reason
+        # a substitution table is ordered by length.
+        judge = Judge()
+        self.assertEqual(judge.restore_echo("AB", "B", "X"), "AX")
+        self.assertEqual(judge.restore_echo("%20", "%20", " "), " ")
+
+
 if __name__ == "__main__":
     unittest.main()

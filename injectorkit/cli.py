@@ -197,13 +197,18 @@ def main(argv: list[str] | None = None) -> int:
     # when the output is being piped or parsed, and skipped under -q as well.
     if not args.quiet and runtime.color_enabled():
         print(banner(f"v{__version__}", runtime.paint), flush=True)
+
+    runtime.info("starting")
+    code = 0
     try:
-        return args.handler(args, runtime)
+        code = args.handler(args, runtime)
     except KeyboardInterrupt:
-        print("\ninterrupted", file=sys.stderr)
-        return 130
+        runtime.warn("interrupted; stopping where it is")
+        code = 130
     finally:
         if runtime.oob is not None:
             runtime.oob.stop()
         if runtime.pheromone is not None:
             runtime.pheromone.save()
+    runtime.info("ending")
+    return code

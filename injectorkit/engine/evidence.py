@@ -23,7 +23,7 @@ import re
 import statistics
 from dataclasses import dataclass
 from typing import Iterable, Sequence
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 from .blackboard import Confidence
 from ..core.httpmsg import Exchange, Response
@@ -65,7 +65,13 @@ class Judge:
 
     # ------------------------------------------------------------- signatures
 
-    def signature(self, response: Response, signatures: Sequence[str], payload: str = "") -> Verdict:
+    def signature(
+        self,
+        response: Response,
+        signatures: Sequence[str],
+        payload: str = "",
+        original: str = "",
+    ) -> Verdict:
         """Look for a signature that only a successful read or fetch produces."""
         # The payload is removed before any decoding, not after: a page that
         # echoes what it was given hands back the base64 blob the payload
@@ -73,6 +79,15 @@ class Judge:
         # looks for. Stripping only the literal spelling misses it entirely and
         # the tool reports its own payload as a finding.
         cleaned = self.strip_payload(response.body, payload)
+        if original:
+            # An echo shows the payload where the page used to show the original
+            # value. Taking the payload out leaves a hole there, and the response
+            # still differs from the baseline - a comparison would call that a
+            # change the target made. Putting the value back makes it read as the
+            # page again, which is the point of knowing what the value was.
+            cleaned = self.restore_echo(
+                cleaned.decode("latin-1", "replace"), payload, original
+            ).encode("latin-1", "replace")
         views = self.decoded_views(cleaned)
         cleaned_views = [self.strip_echo(view, payload).lower() for view in views]
         # A signature can be bytes rather than text: a class file answers with a
@@ -205,26 +220,61 @@ class Judge:
         if not payload:
             return body
         text = body.decode("latin-1", "replace")
-        for spelling in {payload, unquote(payload)}:
-            if spelling:
-                text = text.replace(spelling, "")
+        for spelling in Judge._spellings(payload):
+            text = text.replace(spelling, "")
         for blob in re.findall(r"[A-Za-z0-9+/=]{12,}", payload):
             text = text.replace(blob, "")
         return text.encode("latin-1", "replace")
+
+    @staticmethod
+    def _spellings(payload: str) -> list[str]:
+        """The forms a payload can come back in, longest first, without repeats.
+
+        What was sent, what it is as a percent-encoded value, and a decoding of
+        that. The encoded form is the one most often missed, and the one a page
+        that prints a query string back produces.
+        """
+        out: list[str] = []
+        for candidate in (payload, quote(payload, safe=""), unquote(payload)):
+            if candidate and candidate not in out:
+                out.append(candidate)
+        return sorted(out, key=len, reverse=True)
 
     @staticmethod
     def strip_echo(text: str, payload: str) -> str:
         """Remove the injected value, so its own echo is not mistaken for proof.
 
         The payload may come back as it was sent, percent-encoded, or split
-        across markup, so all spellings are removed before matching.
+        across markup, so every spelling is removed before matching.
+        """
+        if not payload:
+            return text
+        spellings = Judge._spellings(payload)
+        spellings += [payload.replace("\r\n", ""), payload.replace("\r\n", " ")]
+        out = text
+        for spelling in sorted({s for s in spellings if s}, key=len, reverse=True):
+            out = out.replace(spelling, "")
+        return out
+
+    @staticmethod
+    def restore_echo(text: str, payload: str, original: str = "") -> str:
+        """Put the page's own value back where the payload is.
+
+        Removing an echo is not the same as undoing one. A page that prints the
+        parameter straight back shows the payload where it used to show the
+        original value, so deleting the payload leaves that spot empty and the
+        response still differs from the baseline - a comparison then reports a
+        change the target never made. Substituting the original value back makes
+        an echo read as the page again, leaving only a real difference.
+
+        Longest spelling first, for the same reason a substitution table is
+        ordered that way: a short spelling must not consume part of a longer one.
         """
         if not payload:
             return text
         out = text
-        for spelling in {payload, unquote(payload), payload.replace("\r\n", ""), payload.replace("\r\n", " ")}:
-            if spelling:
-                out = out.replace(spelling, "")
+        for spelling in Judge._spellings(payload):
+            out = out.replace(spelling, original)
         return out
 
 

@@ -61,8 +61,15 @@ class FilterChainShell:
         request.url = self._with_command(request.url, command)
         exchange = self.ctx.send(request, action=self.action)
         if exchange.response.error:
-            return f"(no response: {exchange.response.error})"
-        return self._extract(exchange.response.text)
+            return f"the target did not answer: {exchange.response.error}"
+        text = self._extract(exchange.response.text)
+        if text is None:
+            return (
+                "the chain did not run: the response does not contain it. "
+                "The application may be refusing the wrapper, or the request "
+                "may be arriving truncated."
+            )
+        return text or "the command ran and printed nothing"
 
     def _reader(self) -> str:
         """Build the reader chain once and keep it."""
@@ -75,7 +82,7 @@ class FilterChainShell:
         query = parts.query + ("" if not parts.query else "&") + f"{self.aux}={quote(command, safe='')}"
         return urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
 
-    def _extract(self, body: str) -> str:
+    def _extract(self, body: str) -> str | None:
         """The command's output, minus whatever the page wraps it in.
 
         There is no marker to look for: one would push the payload past the
@@ -83,11 +90,15 @@ class FilterChainShell:
         end of the chain is a clean seam; when it does not, the whole response is
         the output. Either way the chain leaves some bytes of its own after the
         payload, so the result is cut at the first character that is not text.
+
+        None when the chain is not in the response at all - the page did not run
+        it, and handing back the body would print a whole HTML document as if it
+        were command output.
         """
         index = body.find(CHAIN_TAIL)
-        tail = body[index + len(CHAIN_TAIL):] if index != -1 else body
-        if index != -1:
-            tail = tail.lstrip("-)> \r\n")
+        if index == -1:
+            return None
+        tail = body[index + len(CHAIN_TAIL):].lstrip("-)> \r\n")
 
         cut = len(tail)
         for position, character in enumerate(tail):

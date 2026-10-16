@@ -48,9 +48,13 @@ STYLES: dict[str, str] = {
 # the output contract, so they are a reliable thing to read - matched after the
 # leading indent, since findings and the board are both indented.
 PREFIX_STYLES: tuple[tuple[str, str], ...] = (
+    ("[*]", "muted"),
     ("[+]", "execute"),
+    ("[-]", "closed"),
+    ("[?]", "covered"),
     ("[!]", "finding"),
     ("[>]", "next"),
+    ("[#]", "section"),
     ("filter:", "filter"),
     ("result:", "result"),
     ("target:", "target"),

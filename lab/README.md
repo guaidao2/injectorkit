@@ -12,6 +12,33 @@ box that is only reachable from the testing machine.
 `teardown.sh` stops everything and undoes what setup changed; `teardown.sh
 --purge` removes the files as well.
 
+### The phar chain, and what actually triggers it
+
+`upload.php` takes a file and keeps the name it was given, writing it under the
+web root where it can be reached again. `Cache.php` is a cache entry of the kind
+a framework hands a phar metadata blob - its `__destruct` writes the file the
+object was told to write - and `include.php` loads it up front, the way a real
+application has its framework loaded before it includes anything.
+
+Worth knowing before relying on any of this: **on PHP 8, opening a phar does not
+unserialize its metadata.** Measured on 8.4.24 against an archive built by
+`core/phar.py`, of these only the last one fires:
+
+    file_exists("phar://.../index.php")     -
+    include "phar://.../index.php"          -
+    file_get_contents("phar://.../x")       -
+    stat("phar://.../index.php")            -
+    opendir("phar://...")                   -
+    new Phar("...phar")                     -
+    count(new Phar("...phar"))              -
+    fopen + fread("phar://...")             -
+    (new Phar("...phar"))->getMetadata()    FIRED
+
+The metadata is held as bytes until something asks for it. A phar chain
+therefore needs the target to call `getMetadata()` - framework code does, a
+plain `include` does not - and a lab that wants to exercise the chain has to
+model that call rather than hope an include is enough.
+
 ## What it exposes
 
 Web application on port 8080 (Apache, mod_php):

@@ -38,7 +38,26 @@ class Fact:
     at: float = field(default_factory=time.time)
 
     def describe(self) -> str:
-        return f"{self.key} = {self.value!r} [{self.confidence.value}] {self.evidence}".strip()
+        """One line for the board, with the value kept to a readable width.
+
+        A finding carries the whole request that produced it. That is worth
+        having in the session file and unreadable on a terminal, so the board
+        says what was proved and on what evidence, and leaves the full value to
+        whoever goes looking for it. A list of findings is summarised by name,
+        which is the part a reader is scanning for.
+        """
+        value = self.value
+        text = repr(value)
+        if len(text) > 120 and isinstance(value, (list, tuple)):
+            names = [
+                str(item.get("name"))
+                for item in value
+                if isinstance(item, dict) and item.get("name")
+            ]
+            text = f"[{', '.join(names)}]" if names else f"[{len(value)} items]"
+        if len(text) > 120:
+            text = text[:117] + "..."
+        return f"{self.key} = {text} [{self.confidence.value}] {self.evidence}".strip()
 
 
 @dataclass
@@ -165,19 +184,25 @@ class Blackboard:
             return cls.from_json(handle.read())
 
     def render(self) -> str:
-        """Human-readable summary, printed at the end of a run."""
-        lines = [f"target: {self.target}"]
+        """Human-readable summary, printed at the end of a run.
+
+        Every line says what kind of line it is, the way the rest of the output
+        does: `[+]` what was proved, `[-]` what was tried and ruled out, `[?]`
+        what was never tried. Those last two are different answers, and a board
+        that renders them the same way is not reporting.
+        """
+        lines = [f"[*] target: {self.target}"]
         if not self.facts:
-            lines.append("  (nothing learned)")
+            lines.append("    (nothing was proved)")
         for key in sorted(self.facts):
-            lines.append("  " + self.facts[key].describe())
+            lines.append(f"[+] {self.facts[key].describe()}")
         if self.dead_ends:
-            lines.append("closed paths:")
+            lines.append("[-] closed paths:")
             for key in sorted(self.dead_ends):
-                lines.append(f"  {key}: {self.dead_ends[key]}")
+                lines.append(f"[-] {key}: {self.dead_ends[key]}")
         if self.not_covered:
-            lines.append("not covered:")
+            lines.append("[?] not covered:")
             for key in sorted(self.not_covered):
-                lines.append(f"  {key}: {self.not_covered[key]}")
-        lines.append(f"requests sent: {self.requests_sent()}")
+                lines.append(f"[?] {key}: {self.not_covered[key]}")
+        lines.append(f"[*] requests sent: {self.requests_sent()}")
         return "\n".join(lines)

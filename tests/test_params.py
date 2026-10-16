@@ -19,6 +19,22 @@ def params_of(request):
     return {param.key(): param for param in extract_params(request)}
 
 
+def upload_request(filename: str = "photo.png", content: bytes = b"PNG data") -> Request:
+    """A multipart request carrying one file part."""
+    boundary = "----ik"
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="avatar"; filename="{filename}"\r\n'
+        f"Content-Type: image/png\r\n\r\n"
+    ).encode() + content + f"\r\n--{boundary}--\r\n".encode()
+    return Request(
+        method="POST",
+        url="http://t/upload",
+        headers=Headers([("Content-Type", f"multipart/form-data; boundary={boundary}")]),
+        body=body,
+    )
+
+
 class Extraction(unittest.TestCase):
     def test_query_parameter(self):
         request = Request.from_url("http://t/f?url=http://example.com")
@@ -69,6 +85,27 @@ class Extraction(unittest.TestCase):
         found = params_of(request)
         self.assertIn("multipart:url", found)
         self.assertEqual(found["multipart:url"].value, "http://example.com")
+
+    def test_a_file_part_is_addressed_by_its_filename_too(self):
+        # A part carrying a file has two values: the one the application reads
+        # as a field, and the name it will be stored under. Only the second
+        # reaches a path.
+        request = upload_request()
+        found = params_of(request)
+        self.assertIn("multipart:avatar", found)
+        self.assertIn("multipart-filename:avatar", found)
+        self.assertEqual(found["multipart-filename:avatar"].value, "photo.png")
+
+    def test_a_plain_part_has_no_filename(self):
+        request = Request(
+            method="POST",
+            url="http://t/f",
+            headers=Headers([("Content-Type", "multipart/form-data; boundary=b")]),
+            body=b'--b\r\nContent-Disposition: form-data; name="note"\r\n\r\nhi\r\n--b--\r\n',
+        )
+        keys = params_of(request)
+        self.assertIn("multipart:note", keys)
+        self.assertNotIn("multipart-filename:note", keys)
 
     def test_json_field_nested_inside_a_document(self):
         request = Request.from_url('http://t/f?json={"ref":"http://example.com"}')

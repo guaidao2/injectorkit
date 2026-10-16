@@ -13,10 +13,21 @@ what the answer means.
 from __future__ import annotations
 
 import argparse
+import secrets
 
+from ...core.httpmsg import parse_headers
 from ...engine.bypass import Bypass
 from ...engine.evidence import Judge
-from ...engine.runner import close_board, collect_targets, open_board, run_targets, select_params
+from ...engine.runner import (
+    baseline_body,
+    choose_target,
+    close_board,
+    collect_targets,
+    no_parameters_message,
+    open_board,
+    run_targets,
+    select_params,
+)
 from ...engine.shell import run as run_shell_loop
 from ...engine.shell import run_once
 from ...engine.statemachine import Engine, RunContext
@@ -91,20 +102,25 @@ def run_shell(args: argparse.Namespace, runtime) -> int:
     there is nothing to decide per command, so the state machine stays out of it.
     """
     targets = collect_targets(args, runtime, NAME)
-    request = targets[0]
-    if len(targets) > 1:
-        runtime.info(f"using the first of {len(targets)} targets")
-
-    params = select_params(request, args.param, args.max_params, LIKELY_PARAMS)
+    extra_headers = frozenset(
+        name.lower() for name, _ in parse_headers(getattr(args, "header", None) or [])
+    )
+    request, params, index = choose_target(
+        targets, args.param, args.max_params, LIKELY_PARAMS, extra_headers
+    )
     if not params:
-        raise SystemExit("no injectable parameter found; name one with --param")
+        raise SystemExit(
+            no_parameters_message(targets, args.max_params, LIKELY_PARAMS, extra_headers)
+        )
+    if index > 1:
+        runtime.info(f"target {index} of {len(targets)} is the one with a parameter")
 
     board = open_board(args, runtime, request)
     context = RunContext(
         graph=build_graph(NAME),
         transport=runtime.transport,
         blackboard=board,
-        judge=Judge(),
+        judge=Judge(baseline=baseline_body(runtime.transport, request)),
         bypass=Bypass(board, enabled=not args.no_bypass),
         oob=runtime.oob,
         pheromone=runtime.pheromone,
@@ -125,6 +141,21 @@ def run_shell(args: argparse.Namespace, runtime) -> int:
     )
 
     execute = FilterChainShell(context, params[0])
+
+    # Ask the chain for something only the chain could print. An application that
+    # echoes the wrapper back gives the extraction a seam to cut at even when
+    # nothing ran, so the tail can be the rest of the page - and then every
+    # command "returns" HTML. One marker tells the two apart before the operator
+    # is handed a shell that does not work.
+    marker = "ik" + secrets.token_hex(4)
+    if marker not in execute(f"echo {marker}"):
+        runtime.warn(
+            "the filter chain did not run on this target: the page answered, but without "
+            "the marker a working chain prints. The application may be refusing php://filter, "
+            "or the request may be arriving truncated."
+        )
+        return 1
+
     if args.os_cmd:
         return run_once(execute, args.os_cmd)
     return run_shell_loop(
@@ -140,7 +171,7 @@ def run_one(request, params, args: argparse.Namespace, runtime) -> None:
         graph=build_graph(NAME),
         transport=runtime.transport,
         blackboard=board,
-        judge=Judge(),
+        judge=Judge(baseline=baseline_body(runtime.transport, request)),
         bypass=Bypass(board, enabled=not args.no_bypass),
         oob=runtime.oob,
         pheromone=runtime.pheromone,

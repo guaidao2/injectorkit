@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 import sys
+import time
 from dataclasses import dataclass, field
 
 from .engine.interactsh import InteractshClient, InteractshError
@@ -34,6 +35,15 @@ class Runtime:
             return message
         return "\n".join(style.style_line(line, True) for line in message.split("\n"))
 
+    def _clock(self) -> str:
+        """The time, when a person is watching a run unfold.
+
+        A pipe or a file gets none of it: a timestamp on every line is for
+        someone following a scan in a terminal, and it is noise in a log that
+        something else is parsing.
+        """
+        return time.strftime("[%H:%M:%S] ") if self._color else ""
+
     def paint(self, text: str, style_name: str) -> str:
         """Colour one piece of text the way this run's output is coloured.
 
@@ -56,9 +66,35 @@ class Runtime:
         print(self._render(message), flush=True)
 
     def info(self, message: str) -> None:
-        """Progress a reader does not need: suppressed by -q."""
+        """What the run is doing, suppressed by -q.
+
+        Prefixed rather than left bare, so a line always says what kind of line
+        it is - the same contract the finding prefixes have always followed. A
+        blank message is a caller separating sections; there is nothing to say.
+        """
+        if message.strip() and not self.quiet:
+            print(self._render(f"{self._clock()}[*] {message.lstrip()}"), flush=True)
+
+    def good(self, message: str) -> None:
+        """Something was proved. Shown even with -q."""
+        print(self._render(f"[+] {message.lstrip()}"), flush=True)
+
+    def warn(self, message: str) -> None:
+        """Something was refused, or did not go as asked."""
         if not self.quiet:
-            print(self._render(message), flush=True)
+            print(self._render(f"{self._clock()}[!] {message.lstrip()}"), flush=True)
+
+    def skip(self, message: str) -> None:
+        """A path that was tried and ruled out."""
+        print(self._render(f"[-] {message.lstrip()}"), flush=True)
+
+    def gap(self, message: str) -> None:
+        """A path that was never tried, and why. Not the same as ruled out."""
+        print(self._render(f"[?] {message.lstrip()}"), flush=True)
+
+    def heading(self, message: str) -> None:
+        """A section of the report."""
+        print(self._render(f"[#] {message.lstrip()}"), flush=True)
 
 
 from .core.httpmsg import parse_headers  # noqa: F401  (re-exported for callers that import it here)

@@ -63,12 +63,17 @@ def run(execute, prompt: str = "os-shell> ", banner: str = "") -> int:
 
 
 def run_once(execute, command: str, output=None) -> int:
-    """One command, for scripting: no prompt, no loop."""
+    """One command, for scripting: no prompt, no loop.
+
+    The text goes out exactly as it came back - this is the mode something else
+    reads - except when there is none, where saying so is more useful than an
+    empty line.
+    """
     text = execute(command)
     if output is not None:
         output.write(text)
         if not text.endswith("\n"):
             output.write("\n")
         return 0
-    print(text.rstrip("\n"))
+    print(text.rstrip("\n") or "(the command produced no output)")
     return 0
