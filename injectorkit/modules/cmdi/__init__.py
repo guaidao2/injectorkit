@@ -35,7 +35,7 @@ from ...engine.runner import (
     run_targets,
 )
 from ...engine.statemachine import Engine, RunContext
-from .graph import build_graph, command_runner
+from .graph import PROVEN, build_graph, command_runner
 
 NAME = "cmdi"
 HELP = (
@@ -79,24 +79,22 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--param", help="parameter to inject into (default: pick the likely ones)")
     parser.add_argument("--max-params", type=int, default=6, help="how many parameters to try")
 
+    # Naming a command is the authorisation. `--exploit` is not required here and
+    # is not offered: this class has no chain of its own to deepen, so a switch
+    # saying "act on what you found" would have nothing to do but repeat what
+    # `--os-cmd` and `--os-shell` already say.
     run = parser.add_argument_group("exploitation")
-    run.add_argument(
-        "--exploit",
-        action="store_true",
-        help="act on the target: run the command given with --os-cmd through the delivery "
-        "that was proved. Without it the run only reports whether the parameter reaches a "
-        "shell",
-    )
     run.add_argument(
         "--os-cmd",
         metavar="COMMAND",
-        help="a command to run through the injection once it is established. Needs --exploit",
+        help="run this command through the injection once it is established, and show what "
+        "it printed",
     )
     run.add_argument(
         "--os-shell",
         action="store_true",
-        help="keep the injection open and run what you type through it. Needs --exploit. "
-        "Reads commands from a terminal or from a pipe, so a scripted session works",
+        help="keep the injection open and run what you type through it. Reads commands from "
+        "a terminal or from a pipe, so a scripted session works",
     )
     run.add_argument(
         "--dry-run",
@@ -124,11 +122,14 @@ def build_context(args: argparse.Namespace, runtime, request, params, board=None
         config={
             "request": request,
             "params": params,
-            "exploit": bool(args.exploit) and not args.dry_run,
+            # `--os-cmd` and `--os-shell` are the request. There is no second
+            # switch, because asking for a command to be run is not the kind of
+            # thing a flag should have to confirm twice - the command is right
+            # there in the argv. `--exploit` means "deepen the finding by
+            # yourself" and this class has nothing of its own to deepen.
+            "exploit": bool(args.os_cmd) and not args.dry_run,
             "dry_run": bool(args.dry_run),
-            # Nothing runs unless it was asked for twice over: the flag that says
-            # running is what you want, and the command to run.
-            "os_cmd": (args.os_cmd or "") if (args.exploit and not args.dry_run) else "",
+            "os_cmd": (args.os_cmd or "") if not args.dry_run else "",
             "via": [],
             "read": [],
             "upload": "",
@@ -187,7 +188,7 @@ def run_shell(args: argparse.Namespace, runtime) -> int:
     ctx = build_context(args, runtime, request, params, board=board)
     try:
         Engine(ctx.graph, ctx).run()
-        if not board.get("cmdi.proven"):
+        if not board.get(PROVEN):
             runtime.warn(
                 "no command execution was established, so there is nothing to open a shell through"
             )

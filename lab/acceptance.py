@@ -185,7 +185,7 @@ def tool_found(output: str) -> bool:
         return True
     # A command that ran leaves its own mark: the passwd line, the uid line, the
     # architecture line. These are outputs, not the word "success".
-    if re.search(r"^uid=\d+\(|^\s*root:x:0:0", output, re.M):
+    if re.search(r"^\s*uid=\d+\(|^\s*root:x:0:0", output, re.M):
         return True
     if re.search(r"^\[-\] (probe|exploit)\.\w+: (raised|service refused)", output, re.M):
         return False

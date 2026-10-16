@@ -260,7 +260,7 @@ PHP-FPM 链，用在应答了的 FastCGI 监听上。它发一对真正的 FastC
 
 活下来的只有纯路径，而访问日志就是一个纯路径。用 `--log-path` 指向它，代码就从服务器**自己写的文件**里进去——走 `User-Agent`，nginx 和 apache 都原样记录：
 
-    python injectorkit.py proto -u "https://target/" --forms --exploit \
+    python injectorkit.py proto -u "https://target/" --forms \
         --log-path /var/log/nginx/access.log --os-cmd 'cat /var/www/html/flag.php'
 
 路径随服务器而变，另一种常见的是 `/var/log/apache2/access.log`。有两点决定它成不成，而两点失败起来都像别的原因：
@@ -278,7 +278,7 @@ payload 用单引号包数组键，这不是风格问题：apache 写入请求�
 
     python injectorkit.py cmdi -u "http://target/ping?host=127.0.0.1"
     python injectorkit.py cmdi -u "http://target/" --data "host=127.0.0.1" --param host
-    python injectorkit.py cmdi -u "http://target/ping?host=x" --exploit --os-cmd 'id'
+    python injectorkit.py cmdi -u "http://target/ping?host=x" --os-cmd 'id'
 
 会碰到 shell 的参数是一道**问题**，不是一张 payload 清单。工具让目标打印两个它刚刚现生成的标记，中间夹一个算出来的数字：
 
@@ -319,9 +319,9 @@ payload 用单引号包数组键，这不是风格问题：apache 写入请求�
 
 `--os-cmd` 沿证成的投递方式执行一条命令。`--os-shell` 把注入留着，你敲什么就执行什么——终端可以，管道也可以：
 
-    python injectorkit.py cmdi -u "http://target/ping?host=x" --exploit --os-cmd 'id'
-    python injectorkit.py cmdi -u "http://target/ping?host=x" --exploit --os-shell
-    printf 'id\nuname -a\nexit\n' | python injectorkit.py cmdi -u ... --exploit --os-shell
+    python injectorkit.py cmdi -u "http://target/ping?host=x" --os-cmd 'id'
+    python injectorkit.py cmdi -u "http://target/ping?host=x" --os-shell
+    printf 'id\nuname -a\nexit\n' | python injectorkit.py cmdi -u ... --os-shell
 
 命令**前后各一个标记**，和命令放在**同一次请求**里，两个标记都回来了才显示响应。单独做一次自检不行：引擎会在每条 payload 之前先发一次参数污染请求，而在"取重复参数第一个值"的框架上，那次请求根本没带 payload——于是自检会被一个什么都没带的请求满足，随后跑命令那次把页面当输出打出来。用两个标记而不是一个，是因为只有前面一个标记说不出输出在哪里结束。
 

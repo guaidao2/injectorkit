@@ -583,13 +583,20 @@ def _application_base(ctx: RunContext) -> str:
 
 
 def exploit_services(ctx: RunContext) -> None:
-    """Act on what was fingerprinted, when the operator asked for it.
+    """Act on what was fingerprinted.
 
-    Nothing here runs by default. Writing a file or running a command on a
-    target is a decision the operator makes; a tool that makes it for them is
-    one nobody should point at a live system.
+    Two different requests arrive here and they are not the same act. `--exploit`
+    is the tool going further on its own initiative - writing a file into a web
+    root, which is a change to somebody's server the operator did not type. A
+    command of their own, given with `--os-cmd`, is a request: it is right there
+    in the argv, so it does not need a second switch to confirm it.
+
+    What that means in practice: the chain that runs a command runs for either,
+    and the chain that writes a file runs only for `--exploit`.
     """
-    if not ctx.config.get("exploit"):
+    acting = bool(ctx.config.get("exploit"))
+    command = ctx.config.get("os_cmd") or ""
+    if not acting and not command:
         ctx.emit("  [!] exploitation is off; pass --exploit to act on what was fingerprinted")
         return
 
@@ -602,7 +609,9 @@ def exploit_services(ctx: RunContext) -> None:
         return
 
     base = _application_base(ctx)
-    if "redis" in names:
+    if "redis" in names and acting:
+        # Writing a file is the part that changes the target, so it stays behind
+        # the switch that says the tool may decide for itself.
         _exploit_redis(ctx, base)
     if "fastcgi" in names:
         _exploit_phpfpm(ctx)

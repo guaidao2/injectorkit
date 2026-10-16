@@ -28,10 +28,12 @@
 
     python injectorkit.py proto -u "http://target/?file=x" --read /flag
 
-要利用而不只是发现，开一个开关：
+要利用而不只是发现，直接点名要。**命名命令本身就是授权**，所以只有一个旗标、不是两个：
 
-    python injectorkit.py proto -u "http://target/?file=x" --exploit --os-cmd 'id'
-    python injectorkit.py proto -u "http://target/?file=x" --exploit --os-shell
+    python injectorkit.py proto -u "http://target/?file=x" --os-cmd 'id'
+    python injectorkit.py proto -u "http://target/?file=x" --os-shell
+
+`--exploit` 是另一回事：它表示**工具可以自己往下走**——造一条链发出去、往 web 目录写文件、往日志里种代码——而不只是报告它证成了什么。
 
 每次运行都会边跑边报它在做什么，结尾给出：证成了什么、排除了什么、还有什么没测到。`-q` 只留结果，`-v` 连请求一起打。`python injectorkit.py <类别> -h` 看该类别的选项。
 
@@ -87,8 +89,8 @@ Python 3.11 或更新。核心零第三方依赖，检出即可运行。经 inte
 跑通之后，`--os-cmd` 会沿着证成的那个形态执行一条命令；`--os-shell` 则把它留着，你敲什么它就执行什么——终端可以，管道也可以，所以脚本化会话能跑。如果链在"证成"和"使用"之间失效了，它如实说没跑，而不是把页面当输出：
 
     python injectorkit.py cmdi -u "http://target/ping?host=127.0.0.1" \
-        --exploit --os-cmd 'id; uname -a'
-    python injectorkit.py cmdi -u "http://target/ping?host=127.0.0.1" --exploit --os-shell
+        --os-cmd 'id; uname -a'
+    python injectorkit.py cmdi -u "http://target/ping?host=127.0.0.1" --os-shell
 
 命令打印出来的东西属于结果，所以它出现在**最后的** `Commands run:` 下面、只出现一次——读到的文件出现在 `Files read:` 也是同一个地方。
 
@@ -96,12 +98,10 @@ Python 3.11 或更新。核心零第三方依赖，检出即可运行。经 inte
 
 穿过一个 `include()` 点拿到执行有两条路，走哪条由目标决定，不是偏好问题：
 
-- `--exploit` 现场生成一条 `php://filter` 链来跑 —— `--os-shell` 给一个会话，`--os-cmd` 只跑一条命令。这要求应用接受 `php://filter`。
+- 默认现场生成一条 `php://filter` 链来跑 —— `--os-shell` 给一个会话，`--os-cmd` 只跑一条命令。这要求应用接受 `php://filter`。
 - `--log-path /var/log/nginx/access.log` 把 PHP 源码种进服务器自己写的文件里，再 include 它。这条路只要纯路径 —— 而拒绝一切 wrapper 的目标，恰好只放行纯路径。
 
-两条都会在目标上执行命令，所以都要 `--exploit`：
-
-    python injectorkit.py proto -u "https://target/" --forms --exploit \
+    python injectorkit.py proto -u "https://target/" --forms \
         --log-path /var/log/nginx/access.log --os-cmd 'id'
 
 ### 走到反序列化

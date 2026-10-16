@@ -24,10 +24,11 @@ what the target will accept, and reports what it proved:
     python injectorkit.py cmdi -u "http://target/ping?host=127.0.0.1"
 
 Once a primitive is proved, `--os-cmd` runs a command through it and shows what
-came back - in all three classes, and it appears with the results at the end:
+came back - in all three classes, and it appears with the results at the end.
+Asking for the command is the request, so nothing else is needed:
 
     python injectorkit.py ssrf -u "http://target/fetch?url=http://127.0.0.1:9000/" \
-        --exploit --fpm-script /var/www/html/index.php --os-cmd 'id'
+        --fpm-script /var/www/html/index.php --os-cmd 'id'
 
 A body is a form post unless you say otherwise, so a parameter behind a form
 takes `--data` rather than a query string:
@@ -43,10 +44,15 @@ instead of guessing:
 
     python injectorkit.py proto -u "http://target/?file=x" --read /flag
 
-When you want the exploit rather than the finding, it is gated behind one flag:
+When you want the exploit rather than the finding, ask for it. Naming the command
+is the authorisation, so there is one flag and not two:
 
-    python injectorkit.py proto -u "http://target/?file=x" --exploit --os-cmd 'id'
-    python injectorkit.py proto -u "http://target/?file=x" --exploit --os-shell
+    python injectorkit.py proto -u "http://target/?file=x" --os-cmd 'id'
+    python injectorkit.py proto -u "http://target/?file=x" --os-shell
+
+`--exploit` is a different thing: it means the tool may go further than the
+finding on its own initiative - build a chain and send it, write a file into a
+web root, plant code in a log - rather than only report what it proved.
 
 Every run prints what it is doing as it goes, and ends with what it proved, what
 it ruled out, and what it never got to. `-q` keeps only the result, `-v` adds the
@@ -141,8 +147,8 @@ proving it and using it, the tool says so rather than printing the page as
 output:
 
     python injectorkit.py cmdi -u "http://target/ping?host=127.0.0.1" \
-        --exploit --os-cmd 'id; uname -a'
-    python injectorkit.py cmdi -u "http://target/ping?host=127.0.0.1" --exploit --os-shell
+        --os-cmd 'id; uname -a'
+    python injectorkit.py cmdi -u "http://target/ping?host=127.0.0.1" --os-shell
 
 What a command printed belongs with the results, so it is shown at the end, under
 `Commands run:`, once - the same place a file that was read appears under
@@ -153,16 +159,14 @@ What a command printed belongs with the results, so it is shown at the end, unde
 Two routes to execution through an `include()` point, and which one applies is
 decided by the target rather than by preference:
 
-- `--exploit` builds a `php://filter` chain on the fly and runs it - `--os-shell`
-  for a live session, `--os-cmd` for one command. This needs the application to
-  accept `php://filter`.
+- a `php://filter` chain built on the fly, chosen by default - `--os-shell` for a
+  live session, `--os-cmd` for one command. This needs the application to accept
+  `php://filter`.
 - `--log-path /var/log/nginx/access.log` plants PHP source in a file the server
   writes for itself, then includes it. This needs nothing but a plain path, which
   is what a target refusing every wrapper still allows.
 
-Both run commands on the target, so both require `--exploit`:
-
-    python injectorkit.py proto -u "https://target/" --forms --exploit \
+    python injectorkit.py proto -u "https://target/" --forms \
         --log-path /var/log/nginx/access.log --os-cmd 'id'
 
 ### Reaching deserialization
@@ -264,13 +268,15 @@ field inside a parameter's value.
 ### Acting on what was found
 
     --exploit --webroot /var/www/html              # write a shell through Redis
-    --exploit --fpm-script /var/www/html/index.php # run code through PHP-FPM
+    --exploit --fpm-script /var/www/html/index.php # run a chain of the tool's own
+    --fpm-script /var/www/html/index.php --os-cmd id   # run a command of your own
 
-Off by default, because writing a file or running a command on a target is the
-operator's decision. When on, the follow-up is derived from the fingerprint: the
-address and port come from the service that answered, the paths from the
-operator, and the result is verified - a shell that was written but does not run
-is reported as exactly that.
+`--exploit` means the tool may go further than the finding by itself, so it is
+off by default: writing a file onto a target is a change nobody typed. A command
+you did type, through `--os-cmd` or `--os-shell`, does not need it. When on, the
+follow-up is derived from the fingerprint: the address and port come from the
+service that answered, the paths from the operator, and the result is verified -
+a shell that was written but does not run is reported as exactly that.
 
 ## How it works
 

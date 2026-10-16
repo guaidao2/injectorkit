@@ -59,9 +59,11 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     exploit.add_argument(
         "--exploit",
         action="store_true",
-        help="act on the target: write a file through Redis (needs --webroot), or run a "
-        "command through PHP-FPM (needs --fpm-script). Each chain first asks the service "
-        "whether it will allow it, so a hardened target is reported as such",
+        help="go further than the finding, on the tool's own initiative: write a file through "
+        "Redis (needs --webroot), or run a chain of the tool's own through PHP-FPM (needs "
+        "--fpm-script). Each chain first asks the service whether it will allow it, so a "
+        "hardened target is reported as such. For a command of your own, say so with "
+        "--os-cmd, which does not need this flag",
     )
     exploit.add_argument("--webroot", metavar="DIR", help="a web-accessible directory on the target, for the Redis chain")
     exploit.add_argument("--shell-name", metavar="FILE", help="filename to write the shell as")
@@ -70,9 +72,9 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     exploit.add_argument(
         "--os-cmd",
         metavar="COMMAND",
-        help="a command to run once execution is established. Needs --exploit. A chain that "
-        "is written rather than executed runs this instead of the `id` it uses to prove "
-        "itself, and prints what came back",
+        help="run this command once execution is established, and show what it printed. It "
+        "appears with the results, under Commands run:. Needs neither --exploit nor "
+        "anything else - asking for the command is the request",
     )
 
     parser.add_argument(
