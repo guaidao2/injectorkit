@@ -35,7 +35,7 @@ from ...engine.shell import run as run_shell_loop
 from ...engine.shell import run_once
 from ...engine.statemachine import Engine, RunContext
 from . import mutators as _mutators  # noqa: F401  (registers this module's mutators)
-from .graph import build_graph
+from .graph import WRAPPERS, build_graph
 from .seeds import LIKELY_PARAMS
 from .shell import FilterChainShell, LogPoisonShell
 
@@ -197,6 +197,40 @@ def run(args: argparse.Namespace, runtime) -> int:
     return run_targets(args, runtime, NAME, LIKELY_PARAMS, run_one)
 
 
+def _why_the_chain_did_not_run(context) -> str:
+    """Which reasons are still open, given what this run already found.
+
+    The chain manufactures PHP source in the stream, and something has to *parse*
+    it for that to be code - `include()`. A wrapper that answered proves only
+    that the value reaches a filesystem function, and `file_get_contents` is one
+    of those: it hands back the chain's output as a string and runs nothing.
+
+    So the two cases do not share a reason, and offering the wrong one wastes the
+    operator's next move. A run whose own findings list a `php://filter` wrapper
+    has already answered "is it refusing php://filter" - saying it may be, in the
+    line under that finding, is the report arguing with itself.
+    """
+    wrappers = context.blackboard.get(WRAPPERS) or []
+    if isinstance(wrappers, str):
+        wrappers = [wrappers]
+    filters = [name for name in wrappers if "filter" in str(name)]
+    if filters:
+        return (
+            "the chain did not run: the value is reaching a filesystem function that is not "
+            "parsing what comes back, so this reads files rather than including them. A "
+            f"wrapper did answer here ({', '.join(sorted(str(w) for w in filters))}), so the "
+            "route is open - it is the sink that is the wrong kind"
+        )
+    return (
+        "the filter chain did not run: the page answered, but without the marker a working "
+        "chain prints. Three things could be behind that - php://filter refused, this "
+        "parameter not reaching an include(), or the request arriving truncated - and none of "
+        "them is a statement that the target cannot run code. A chain's output has to be "
+        "parsed to be code, and a read that works is not that proof; --log-path is the route "
+        "that needs no wrapper"
+    )
+
+
 def run_shell(args: argparse.Namespace, runtime) -> int:
     """A live session instead of a scan.
 
@@ -272,11 +306,7 @@ def run_shell(args: argparse.Namespace, runtime) -> int:
     else:
         execute = FilterChainShell(context, params[0])
         where = f"filter chain over {params[0].key()}"
-        why = (
-            "the filter chain did not run on this target: the page answered, but without the "
-            "marker a working chain prints. The application may be refusing php://filter, or "
-            "the request may be arriving truncated"
-        )
+        why = _why_the_chain_did_not_run(context)
 
     try:
         # Ask for something only a working chain could print, and ask for a

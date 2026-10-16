@@ -226,15 +226,26 @@ class AFileThatWasRead(unittest.TestCase):
         # read that never happened.
         board = Blackboard(target="t")
         board.set("read.file./empty", "", evidence="read", confidence=Confidence.CONFIRMED)
-        self.assertEqual(board.reads(), [("/empty", "")])
+        self.assertEqual(board.reads(), [("/empty", "", False)])
         block = board.render_findings()
         self.assertIn("Files read:", block)
         self.assertIn("(the file is empty)", block)
 
-    def test_a_file_is_still_listed_after_a_session_is_reloaded(self):
+    def test_a_file_read_is_not_carried_into_the_session(self):
+        # What the target said is a reading of a moment: the file may have changed
+        # since. Serving it from the session would be a claim about a run that is
+        # not this one, so it is not written - and asking again is cheap because
+        # the path that reached it *is* written.
         board = Blackboard.from_json(self.board().to_json())
-        self.assertIn("Files read:", board.render_findings())
-        self.assertIn("root:x:0:0", board.render_findings())
+        self.assertEqual(board.reads(), [])
+        self.assertNotIn("Files read:", board.render_findings())
+
+    def test_but_the_path_it_was_read_from_is_carried(self):
+        board = Blackboard(target="t")
+        board.set("read.file./etc/passwd", "root:x:0:0\n", evidence="read")
+        board.set("target.paths.read", ["/etc/passwd"], evidence="a run read this path")
+        reloaded = Blackboard.from_json(board.to_json())
+        self.assertEqual(reloaded.get("target.paths.read"), ["/etc/passwd"])
 
     def test_only_the_first_lines_are_printed(self):
         from injectorkit.engine.blackboard import READ_LINES, READ_FACT_PREFIX
@@ -284,14 +295,81 @@ class ACommandThatWasRun(unittest.TestCase):
         board.remember_run("true", "")
         self.assertIn("(no output)", board.render_findings())
 
-    def test_it_survives_a_session_reload(self):
+    def test_a_command_output_is_not_carried_into_the_session(self):
+        # Same reasoning as a file: the process may have been restarted, the
+        # working directory may differ, the machine may not be the same one. What
+        # is kept is which parameter and which delivery reached a shell.
         board = Blackboard(target="t")
         board.remember_run("id", "uid=33(www-data)\n")
         reloaded = Blackboard.from_json(board.to_json())
-        self.assertIn("uid=33(www-data)", reloaded.render_findings())
+        self.assertEqual(reloaded.runs(), [])
+        self.assertNotIn("Commands run:", reloaded.render_findings())
 
     def test_a_commandless_board_renders_nothing(self):
         self.assertEqual(Blackboard(target="t").render_findings(), "")
+
+
+class AnOldSessionThatStillHoldsContent(unittest.TestCase):
+    """The rule is "content is not written", and old files break it.
+
+    A session written before that rule holds file bodies and command output. The
+    marking is what keeps those readable rather than misleading: an answer with no
+    note is how a run that read nothing printed a file under a heading that says
+    the run read it.
+    """
+
+    def old_session(self, **facts):
+        """A session file as an older version wrote one: content and all."""
+        import json
+
+        payload = {
+            "target": "t",
+            "facts": {
+                key: {
+                    "key": key,
+                    "value": value,
+                    "evidence": "",
+                    "confidence": "confirmed",
+                    "at": 0.0,
+                }
+                for key, value in facts.items()
+            },
+            "dead_ends": {},
+            "not_covered": {},
+        }
+        return Blackboard.from_json(json.dumps(payload))
+
+    def test_a_reloaded_file_is_marked_as_resumed(self):
+        board = self.old_session(**{"read.file./etc/passwd": "root:x:0:0:root:/root:/bin/bash\n"})
+        block = board.render_findings()
+        self.assertIn("/etc/passwd  (resumed from an earlier run)", block)
+
+    def test_a_file_read_by_this_run_is_not_marked(self):
+        board = Blackboard(target="t")
+        board.set(
+            "read.file./etc/passwd",
+            "root:x:0:0:root:/root:/bin/bash\n",
+            evidence="read",
+            confidence=Confidence.CONFIRMED,
+        )
+        self.assertNotIn("resumed", board.render_findings())
+
+    def test_a_reloaded_command_is_marked_as_resumed(self):
+        board = self.old_session(**{"run.command.id": "uid=33(www-data) gid=33(www-data)\n"})
+        self.assertIn("id  (resumed from an earlier run)", board.render_findings())
+
+    def test_reads_says_which_ones_came_from_the_session(self):
+        board = self.old_session(**{"read.file./etc/passwd": "x\n"})
+        board.set("read.file./flag", "y\n", evidence="read", confidence=Confidence.CONFIRMED)
+        self.assertEqual(
+            board.reads(),
+            [("/etc/passwd", "x\n", True), ("/flag", "y\n", False)],
+        )
+
+    def test_the_count_of_carried_facts_is_what_the_run_level_line_reports(self):
+        board = self.old_session(**{"read.file./etc/passwd": "x\n", "proto.proven": True})
+        board.set("read.file./flag", "y\n", evidence="read", confidence=Confidence.CONFIRMED)
+        self.assertEqual(sum(1 for fact in board.facts.values() if fact.carried), 2)
 
 
 class WhatIsSettledAndWhatIsATodo(unittest.TestCase):

@@ -335,7 +335,7 @@ def note_read(board, path: str, body: str = "") -> None:
         board.add(
             READ_PATHS,
             _tidy(path),
-            evidence="the run read this path",
+            evidence="a run read this path",
             confidence=Confidence.CONFIRMED,
         )
     for stated in webroot_from_config(body):

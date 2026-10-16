@@ -49,6 +49,18 @@ RUN_FACT_PREFIX = "run.command."
 # How much of a command's output to print.
 RUN_LINES = 40
 
+# The word for a value that came out of the session rather than out of this run,
+# for the result block. One phrase, reused: the project already says it on the
+# line that announces a read, and a second wording for one fact is how two
+# spellings of the same thing end up disagreeing.
+RESUMED = "  (resumed from an earlier run)"
+
+# What the target said, as opposed to what the run worked out about it. These are
+# readings of a moment and are never written to the session: the file may have
+# changed, and a stale reading presented as a result is worse than no reading at
+# all. The path that reached them is written, so asking again is cheap.
+CONTENT_PREFIXES = (READ_FACT_PREFIX, RUN_FACT_PREFIX)
+
 
 @dataclass
 class Fact:
@@ -59,6 +71,16 @@ class Fact:
     evidence: str = ""
     confidence: Confidence = Confidence.INCONCLUSIVE
     at: float = field(default_factory=time.time)
+    # Whether this came out of the session file rather than out of this run.
+    #
+    # Set on load and never cleared, because a fact that a run re-derives is
+    # written again by `set`, which builds a new Fact. It is deliberately not
+    # tracked per element: `add` merges into a list, and a list holding one
+    # answer from this run and three from the last one is neither carried nor
+    # this run's. The content sections below are single-valued facts, which is
+    # where this can be said without lying; a list is covered by the run-level
+    # line instead.
+    carried: bool = False
 
     def describe(self) -> str:
         """One line for the board, with the value kept to a readable width.
@@ -192,10 +214,31 @@ class Blackboard:
     # ------------------------------------------------------------ persistence
 
     def to_json(self) -> str:
+        """Everything learned about the target's shape - and none of its content.
+
+        Two kinds of fact, and they age differently. What a run worked out about
+        the target's *shape* - which parameter takes a wrapper, which delivery
+        reaches a shell, where files live - is the path it found, and that is what
+        the next run should start from. What the target *said* - the bytes of a
+        file, the output of a command - is a reading of a moment: the file may
+        have changed since, and an answer served from a session file is a claim
+        about a run that is not this one.
+
+        So the content facts are not written. They are re-fetched when the
+        operator asks again, and the path that is written is what makes asking
+        again cheap - the wrapper that worked is tried first instead of searched
+        for. Measured: a warm `--read` run costs a handful of requests instead of
+        the whole ladder, because the ladder's outcome is the part that survived.
+        """
+        keep = {
+            key: asdict(fact)
+            for key, fact in self.facts.items()
+            if not key.startswith(CONTENT_PREFIXES)
+        }
         return json.dumps(
             {
                 "target": self.target,
-                "facts": {key: asdict(fact) for key, fact in self.facts.items()},
+                "facts": keep,
                 "dead_ends": self.dead_ends,
                 "not_covered": self.not_covered,
             },
@@ -214,6 +257,9 @@ class Blackboard:
                 evidence=raw.get("evidence", ""),
                 confidence=Confidence(raw.get("confidence", "inconclusive")),
                 at=raw.get("at", time.time()),
+                # Everything here came off disk. Whatever the run does next
+                # writes its own Fact, so this is the whole of the marking.
+                carried=True,
             )
         board.dead_ends = dict(parsed.get("dead_ends", {}))
         board.not_covered = dict(parsed.get("not_covered", {}))
@@ -288,8 +334,8 @@ class Blackboard:
         if reads:
             lines.append("")
             lines.append("Files read:")
-            for path, content in reads:
-                lines.append(f"    {path}")
+            for path, content, carried in reads:
+                lines.append(f"    {path}{RESUMED if carried else ''}")
                 body = content.splitlines()
                 if not body:
                     lines.append("      (the file is empty)")
@@ -302,8 +348,8 @@ class Blackboard:
         if runs:
             lines.append("")
             lines.append("Commands run:")
-            for command, output in runs:
-                lines.append(f"    {command}")
+            for command, output, carried in runs:
+                lines.append(f"    {command}{RESUMED if carried else ''}")
                 body = output.splitlines()
                 if not body:
                     lines.append("      (no output)")
@@ -327,25 +373,30 @@ class Blackboard:
         A file with nothing in it is still shown. "I read it and it is empty" is
         an answer to what was asked; dropping it here is how the operator gets
         silence and cannot tell it from a read that never happened.
+
+        The third element says whether the answer came out of the session. It is
+        the `Fact`'s own note, which used to be thrown away by returning a pair -
+        and an answer with no note is how a run that read nothing printed a file
+        under a heading that says the run read it.
         """
-        out: list[tuple[str, str]] = []
+        out: list[tuple[str, str, bool]] = []
         for key, fact in self.facts.items():
             if not key.startswith(READ_FACT_PREFIX):
                 continue
             path = key[len(READ_FACT_PREFIX) :]
             if isinstance(fact.value, str):
-                out.append((path, fact.value))
+                out.append((path, fact.value, fact.carried))
         return sorted(out)
 
-    def runs(self) -> list[tuple[str, str]]:
-        """The commands a run executed, and what each printed."""
-        out: list[tuple[str, str]] = []
+    def runs(self) -> list[tuple[str, str, bool]]:
+        """The commands a run executed, and what each printed. See `reads`."""
+        out: list[tuple[str, str, bool]] = []
         for key, fact in self.facts.items():
             if not key.startswith(RUN_FACT_PREFIX):
                 continue
             command = key[len(RUN_FACT_PREFIX) :]
             output = fact.value if isinstance(fact.value, str) else ""
-            out.append((command, output))
+            out.append((command, output, fact.carried))
         return sorted(out)
 
     def remember_run(self, command: str, output: str) -> None:

@@ -241,7 +241,17 @@ class Engine:
                     self.ctx.log(f"   already ruled out: {action.description}")
                     continue
                 done = f"ran.{action.id}"
-                if self.ctx.blackboard.has(done) and not action.is_wanted(self.ctx.config):
+                if (
+                    self.ctx.blackboard.has(done)
+                    and not action.is_wanted(self.ctx.config)
+                    # An action that closed with "I could not do this, and here is
+                    # what it would take" has not answered the question. Skipping
+                    # it anyway is how the run that supplies the missing thing -
+                    # the listener, the switch - went straight past the action and
+                    # printed the earlier run's excuse for it, and how a session
+                    # already holding that pair keeps printing it forever.
+                    and not self.ctx.blackboard.not_covered.get(action.id)
+                ):
                     self.ctx.info(f"skipping {action.description}: already tried on this page")
                     continue
                 self.ctx.info(f"testing {action.description}")
@@ -261,9 +271,12 @@ class Engine:
                         self.ctx.log(traceback.format_exc())
                 finally:
                     # Recorded whether it worked or not. "This page has been
-                    # tried" is the fact that saves the next run the work; a
-                    # target that refused once is not asked again unless the
-                    # operator asks for a fresh start with --flush-session.
+                    # tried" is the fact that saves the next run the work, and it
+                    # stays true even for an action that bailed on a missing
+                    # condition - that action ran, said what it needed, and the
+                    # skip check reads that note to decide whether to ask again.
+                    # (Not recording it here would also drop the action out of
+                    # the -v bookkeeping, which is the record of what was asked.)
                     self.ctx.blackboard.add(
                         done,
                         True,

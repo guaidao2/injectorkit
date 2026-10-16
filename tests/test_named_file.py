@@ -327,5 +327,62 @@ class RememberedAnswers(unittest.TestCase):
             self.assertEqual(item.wanted, "", item.id)
 
 
+class WhichReasonsAreStillOpen(unittest.TestCase):
+    """The report must not argue with its own findings.
+
+    The chain manufactures PHP source in the stream, and something has to parse it
+    for that to be code - `include()`. A `php://filter` wrapper that answered
+    proves the value reaches a filesystem function, and rules out the application
+    refusing the wrapper. So a run whose own findings list that wrapper, and whose
+    next line says the application may be refusing it, is contradicting itself and
+    sends the operator to check something the same run already settled.
+
+    Measured on a live target, where the read worked and the chain did not:
+
+        [+] proto.findings = [php-filter-base64, php-filter-base64-read] [confirmed]
+        [!] the filter chain did not run ... may be refusing php://filter
+    """
+
+    def why(self, wrappers):
+        from injectorkit.engine.blackboard import Blackboard
+        from injectorkit.modules.proto import _why_the_chain_did_not_run
+
+        board = Blackboard(target="t")
+        if wrappers is not None:
+            board.set("proto.wrappers", wrappers)
+        return _why_the_chain_did_not_run(SimpleNamespace(blackboard=board))
+
+    def test_with_nothing_answered_a_refusal_is_still_possible(self):
+        self.assertIn("refused", self.why([]))
+
+    def test_with_nothing_recorded_at_all_a_refusal_is_still_possible(self):
+        self.assertIn("refused", self.why(None))
+
+    def test_the_open_case_says_it_is_not_a_verdict_about_the_target(self):
+        # The operator reads "the chain did not run" as "the target cannot run
+        # code", and it means nothing of the kind: the chain needs a sink that
+        # parses, and a read that works is not that proof.
+        why = self.why([])
+        self.assertIn("is a statement that the target cannot run code", why)
+        self.assertIn("none of them", why)
+        self.assertIn("--log-path", why)
+
+    def test_after_a_filter_wrapper_answered_a_refusal_is_not_offered(self):
+        self.assertNotIn("refused", self.why(["php-filter-base64"]))
+
+    def test_and_the_reason_given_is_the_sink(self):
+        why = self.why(["php-filter-base64"])
+        self.assertIn("reads files rather than including them", why)
+        self.assertIn("php-filter-base64", why)
+
+    def test_a_wrapper_that_is_not_a_filter_leaves_the_question_open(self):
+        # A `file://` read says the value reaches a filesystem function, but not
+        # that this parameter's sink would take `php://filter` at all.
+        self.assertIn("refused", self.why(["file-scheme"]))
+
+    def test_a_wrapper_recorded_as_a_single_string_is_still_seen(self):
+        self.assertNotIn("refused", self.why("php-filter-base64"))
+
+
 if __name__ == "__main__":
     unittest.main()

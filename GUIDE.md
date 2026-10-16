@@ -524,25 +524,38 @@ another is how a resumed scan quietly skips the thing it should have tested.
 
 ### What a session keeps, and what it does with it
 
-It keeps what was found, not a list of what was done. The distinction shows up
-the moment you ask for something by name:
+It keeps the path, not the answer.
 
     --flush-session                 forget it and start over
-    --read FILE                     ask for a file, on a session or without one
+    --read FILE                     ask for a file; always fetched, never replayed
 
-A resumed run does not merely skip the actions that already ran - it re-asks the
-questions and answers them from what was learned. That is why `--read /etc/passwd`
-against a warm session still prints the file, and still costs nothing:
+What a run worked out about the target's *shape* - which parameter takes a
+wrapper, which delivery reaches a shell, where files live - is the path it found,
+and that is what the next run starts from. What the target *said* - the bytes of a
+file, the output of a command - is a reading of a moment. The file may have
+changed since, the process may have been restarted, the machine may not even be
+the same one. Serving it from a session file would be an answer about a run that
+is not this one.
 
-    [+] read /etc/passwd (resumed from an earlier run)
-    ...
-    Files read:
-        /etc/passwd
-          root:x:0:0:root:/root:/bin/bash
+So content is fetched again, every time:
 
-Remembering "the read action ran here" would have been enough to skip it, and the
-run would have printed the payload it would have used and nothing else: the file
-was never kept. What is kept is the answer.
+    run 1  --read /etc/passwd      21 requests
+    run 2  --read /etc/passwd       3 requests
+
+Both runs read the file, and the second one reads it as it is now. It is cheaper
+because the wrapper that worked is already known, so it is tried first instead of
+searched for - which is the whole value of keeping the path. A file read on a warm
+session costs a handful of requests, not none.
+
+A run that asks for nothing new fetches nothing:
+
+    [*] 14 fact(s) here were answered from the session rather than asked again;
+        --flush-session forgets them
+    [*] requests sent: 2
+
+The line says how much of the report this run did not do. It counts answers that
+were reused rather than requests that were sent, because a run can send its
+baseline and still have worked nothing out for itself.
 
 Actions that are not a request for a specific thing are still skipped outright -
 there is nothing to show, only work not to redo.

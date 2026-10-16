@@ -154,6 +154,18 @@ def emit_summary(runtime, board, args) -> None:
     hand. One tail for every subcommand.
     """
     runtime.emit("")
+    # How much of this report is this run's. Keyed on "were answers reused", not
+    # on "were requests sent": a fully warm run still sends the baseline, so a
+    # count of requests would miss exactly the case this is for. It goes through
+    # `emit` because every other marking in the tool rides on `info` or `warn`,
+    # both of which `-q` removes - which made quiet mode the one mode with a
+    # full-looking report and no provenance anywhere in it.
+    carried = sum(1 for fact in board.facts.values() if fact.carried)
+    if carried:
+        runtime.emit(
+            f"[*] {carried} fact(s) here were answered from the session rather than "
+            "asked again; --flush-session forgets them"
+        )
     runtime.emit(board.render())
     if getattr(args, "verbose", 0):
         tried = board.render_bookkeeping()

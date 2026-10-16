@@ -16,7 +16,7 @@ LAB=/opt/injectorkit-lab
 PORT=8080
 # The PowerShell endpoint runs under its own server; see the note near the end.
 PS_PORT=8086
-REQUIRED_FILES=(www/index.php www/fetch.php www/include.php www/redirect.php internal.py waf.py javalab/ProtoLab.java)
+REQUIRED_FILES=(www/index.php www/fetch.php www/include.php www/read.php www/redirect.php internal.py waf.py javalab/ProtoLab.java)
 
 for relative in "${REQUIRED_FILES[@]}"; do
     if [ ! -f "$LAB/$relative" ]; then

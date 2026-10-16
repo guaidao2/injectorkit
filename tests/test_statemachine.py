@@ -175,6 +175,88 @@ class WhatAResumedRunOwesTheOperator(unittest.TestCase):
         self.run_it(board, ran, config={"exploit": True})
         self.assertEqual(ran, [], "a path that was tried and closed is still closed")
 
+    def test_an_outstanding_todo_reopens_a_cached_action(self):
+        # `ran.<action>` means "this page has been tried" and normally skips the
+        # action. But an action that closed with "I could not do this, and here is
+        # what it would take" has not answered the question: the run that supplies
+        # the listener or the switch has to be allowed to try it. Without this, a
+        # session holding both keys printed the earlier run's excuse forever -
+        # including in sessions written before the entry was ever withdrawn.
+        board = Blackboard(target="t")
+        board.add("ran.exploit.chain", True, evidence="tried on this page")
+        board.mark_not_covered("exploit.chain", "no listener was given")
+        ran: list = []
+
+        def body(ctx) -> None:
+            ran.append(True)
+
+        graph = StateGraph(name="t", start="s")
+        graph.add(State(name="s", description="", actions=[Action("exploit.chain", "run", body)]))
+        from injectorkit.engine.statemachine import Engine, RunContext
+
+        ctx = RunContext(
+            graph=graph,
+            transport=None,
+            blackboard=board,
+            pheromone=PheromoneTable(path="", enabled=False),
+            max_requests=10,
+        )
+        Engine(graph, ctx).run()
+        self.assertEqual(ran, [True])
+
+    def test_a_cached_action_with_no_todo_is_still_skipped(self):
+        board = Blackboard(target="t")
+        board.add("ran.exploit.chain", True, evidence="tried on this page")
+        ran: list = []
+
+        def body(ctx) -> None:
+            ran.append(True)
+
+        graph = StateGraph(name="t", start="s")
+        graph.add(State(name="s", description="", actions=[Action("exploit.chain", "run", body)]))
+        from injectorkit.engine.statemachine import Engine, RunContext
+
+        ctx = RunContext(
+            graph=graph,
+            transport=None,
+            blackboard=board,
+            pheromone=PheromoneTable(path="", enabled=False),
+            max_requests=10,
+        )
+        Engine(graph, ctx).run()
+        self.assertEqual(ran, [])
+
+    def test_the_second_run_tries_it_again_and_the_excuse_goes(self):
+        board = Blackboard(target="t")
+        seen: list = []
+
+        def condition_met(ctx) -> None:
+            seen.append(True)
+            ctx.blackboard.forget_not_covered("exploit.chain")
+
+        def condition_missing(ctx) -> None:
+            ctx.blackboard.mark_not_covered("exploit.chain", "no listener was given")
+
+        from injectorkit.engine.statemachine import Engine, RunContext
+
+        def run_once(body):
+            graph = StateGraph(name="t", start="s")
+            graph.add(State(name="s", description="", actions=[Action("exploit.chain", "run", body)]))
+            ctx = RunContext(
+                graph=graph,
+                transport=None,
+                blackboard=board,
+                pheromone=PheromoneTable(path="", enabled=False),
+                max_requests=10,
+            )
+            Engine(graph, ctx).run()
+
+        run_once(condition_missing)
+        self.assertIn("exploit.chain", board.not_covered)
+        run_once(condition_met)
+        self.assertEqual(seen, [True], "the run that supplies the listener has to try it")
+        self.assertNotIn("exploit.chain", board.not_covered)
+
 
 class Transitions(unittest.TestCase):
     def test_a_transition_names_where_it_leads(self):
