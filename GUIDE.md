@@ -12,6 +12,7 @@ here runs as written.
 - [What it does, step by step](#what-it-does-step-by-step)
 - [Exploitation](#exploitation)
 - [The pseudo-protocol class](#the-pseudo-protocol-class)
+- [The command-injection class](#the-command-injection-class)
 - [Memory between runs](#memory-between-runs)
 - [Reading the output](#reading-the-output)
 - [Exit codes and scripting](#exit-codes-and-scripting)
@@ -368,6 +369,96 @@ one; `--upload` points at something already on the target. The JNDI schemes are
 sent and judged by callback, but a listener that only speaks HTTP records the
 connection and not the protocol exchange - enough to prove the target dialled out,
 not enough to serve a gadget.
+
+## The command-injection class
+
+    python injectorkit.py cmdi -u "http://target/ping?host=127.0.0.1"
+    python injectorkit.py cmdi -u "http://target/" --data "host=127.0.0.1" --param host
+    python injectorkit.py cmdi -u "http://target/ping?host=x" --exploit --os-cmd 'id'
+
+A parameter that reaches a shell is a question, not a payload list. The tool asks
+the target to print two markers it has just invented with a computed number
+between them:
+
+    echo ik<random>; echo $((4831+2957)); echo ik<random>
+
+The page that reflects the input hands back the expression. Only a shell that ran
+it hands back `7788`. Nothing about that payload contains the answer, so a page
+echoing its own input cannot pass - which is the whole point, because reflexion
+is what a command-injection probe most easily mistakes for execution.
+
+Because the question is the same in every shell, the shell is something to
+search rather than something to assume. Two axes are crossed:
+
+    the language      sh, bash, PowerShell, the Windows command interpreter -
+                      modelled as what can print a literal and print a sum, so
+                      the payload is written the way that shell writes it
+    how it starts     the value is the whole command; or it is an argument to a
+                      command the page already runs and has to be ended first,
+                      with `;`, `|`, `&&`, `||` or a newline
+
+The dialect decides which rewrites apply, not whether a capability exists. Brace
+expansion, for instance, is bash and not dash - so it is a rewrite that belongs
+to one dialect rather than one the catalogue gives up on.
+
+Every rewrite in the catalogue answers a single sentence: a filter reads the
+value as text, the shell reads it as a command line, and a rewrite only earns its
+place if it changes what the filter sees while the word the shell runs is
+unchanged. Four candidates that could not answer it were measured and dropped,
+including a separator form whose pipe swallows all but the last of the proof's
+three statements.
+
+Options that matter:
+
+    --param NAME       which parameter to attack (default: pick the likely ones)
+    --max-params N     how many of them to try
+    --exploit          turns on the exploitation step; nothing runs without it
+    --os-cmd COMMAND   the command to run through the shape that was proved
+    --dry-run          resolve everything, send nothing
+
+### Why it asks every dialect before deepening any
+
+Every dialect-and-starting-point pair gets its cheapest question before any of
+them is allowed to climb its rewrites - the same rule the pseudo-protocol class
+follows, for the same reason.
+
+It is not theoretical. Measured on a Windows host, the command interpreter is the
+fourth entry in the list, and the first three spent the entire request budget
+deepening one guess each: three hundred requests, no finding, and the fourth
+dialect was never asked at all. Asking each pair once first finds it in
+forty-three.
+
+### Why a slow answer ends a seed
+
+A value that reaches a command as an argument and does not end it makes that
+command wait - a name to resolve, a host to reach. Measured on the lab, one such
+payload costs fifteen seconds against a tenth of a second baseline, and the next
+forty rewrites of it cost the same for the same answer. So the run measures a
+reference response first, and a seed that comes back far slower than the best
+answer so far is left unclimbed rather than spent. The other seeds are still
+tried; nothing was learned about the filter, so nothing is rewarded.
+
+### Running a command
+
+`--os-cmd` runs one command through the delivery that was proved to work. The
+marker goes out in the same request as the command, and the response is only
+shown if the marker comes back in it. A separate self-check does not do: the run
+sends a parameter-pollution request before each payload, and on a framework that
+reads the first of a repeated parameter that request carries no payload at all -
+so a check of its own can be satisfied by a request that carried nothing, and the
+command that follows prints the page as though it were output.
+
+When the marker does not come back, the tool says the injection stopped working
+between proving it and using it. It does not print the response.
+
+### What it does not do
+
+It does not run a tamper table lifted from another tool, and it does not carry a
+list of literal payloads. What it has is a question and rewrites derived from it,
+each one traceable to the two layers it plays against. A target whose filter
+refuses every spelling the catalogue has is reported as filtered - not clean -
+because "nothing got through" and "nothing reached a shell" are different
+findings and a run says which one it has.
 
 ## Memory between runs
 

