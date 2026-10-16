@@ -11,6 +11,18 @@ declare(strict_types=1);
 // __PHP_Incomplete_Class - which does nothing at all.
 require_once __DIR__ . '/Cache.php';
 
+// The framework starts a session too, and that is what makes this endpoint the
+// place a session file becomes reachable: `session_start()` reads the file and
+// hands its contents to `unserialize()`, and the same request that includes a
+// file can be pointed at the file it just read.
+session_start();
+
+// A framework keeps something in the session - a flash message, a CSRF token, a
+// visit counter. This one counts requests, which is the smallest thing that
+// leaves the session file non-empty and so visibly a session file rather than an
+// empty file that might equally be a missing one.
+$_SESSION['seen'] = ($_SESSION['seen'] ?? 0) + 1;
+
 $file = isset($_GET['file']) ? (string) $_GET['file'] : '';
 header('Content-Type: text/plain; charset=utf-8');
 

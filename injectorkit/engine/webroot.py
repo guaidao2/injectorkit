@@ -104,18 +104,30 @@ class Roots:
     def paths(self) -> list[str]:
         return [guess.path for guess in self.guesses]
 
-    def add(self, path: str, source: str, observed: bool = False) -> None:
+    def add(self, path: str, source: str, observed: bool = False, first: bool = False) -> None:
+        """Add a candidate. `first` puts it at the front of the queue.
+
+        Order is the whole value here: the candidates are tried one at a time
+        until one works, so a directory derived from evidence has to sit ahead of
+        one that came off a list, and `first` is how a caller that knows it has
+        something better says so.
+        """
         path = _tidy(path)
         if not path or path == "/":
             return
-        for existing in self.guesses:
+        for index, existing in enumerate(self.guesses):
             if existing.path.lower() == path.lower():
-                # Seen beats guessed, and the first source that found it stands.
                 if observed and not existing.observed:
                     existing.observed = True
                     existing.source = source
+                if first and index > 0:
+                    self.guesses.insert(0, self.guesses.pop(index))
                 return
-        self.guesses.append(RootGuess(path=path, source=source, observed=observed))
+        entry = RootGuess(path=path, source=source, observed=observed)
+        if first:
+            self.guesses.insert(0, entry)
+        else:
+            self.guesses.append(entry)
 
     def describe(self) -> str:
         if not self.guesses:
@@ -328,5 +340,5 @@ def roots_for_run(board, operator_said: str = "", windows: bool = False) -> Root
     # paths derived from reads: a directory a server says it serves is not an
     # inference about where a file might be.
     for stated in reversed(list(board.get(STATED_ROOTS) or [])):
-        roots.add(stated, "the server's own configuration names it", observed=True)
+        roots.add(stated, "the server's own configuration names it", observed=True, first=True)
     return roots

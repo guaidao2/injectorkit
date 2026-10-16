@@ -91,6 +91,40 @@ class TransportOptions:
     retries: int = 0
 
 
+def merge_cookies(existing: str, added: str) -> str:
+    """Add the cookies that are not already there, and leave the rest alone.
+
+    The rule is per cookie, not per header. A request may carry its own - a CSRF
+    token, a consent flag - and the operator's session has to join them rather
+    than replace them. But a name that is already present must not be appended a
+    second time: the target request now carries the operator's identity as well,
+    so that its cookie becomes an injectable position, and appending would put
+    the same cookie on the wire twice and leave which one wins to the server.
+
+    A pair already present keeps the value the request carries. That is the same
+    rule the other headers follow - what the request says is more specific than a
+    command-line default - and it is what keeps the injected value in place when
+    the request is the one being rewritten.
+    """
+    if not existing:
+        return added
+    if not added:
+        return existing
+    present = {
+        pair.split("=", 1)[0].strip().lower()
+        for pair in existing.split(";")
+        if pair.strip()
+    }
+    extra = [
+        pair.strip()
+        for pair in added.split(";")
+        if pair.strip() and pair.split("=", 1)[0].strip().lower() not in present
+    ]
+    if not extra:
+        return existing
+    return "; ".join([existing, *extra])
+
+
 @dataclass
 class Transport:
     """A client with no opinion about why a request is being sent."""
@@ -147,7 +181,7 @@ class Transport:
                 continue
             if name.lower() == "cookie":
                 existing = headers.get("Cookie") or ""
-                headers.set("Cookie", f"{existing}; {value}" if existing else value)
+                headers.set("Cookie", merge_cookies(existing, value))
             elif not headers.get(name):
                 headers.set(name, value)
 

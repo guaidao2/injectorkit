@@ -21,6 +21,17 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/Cache.php';
 
+// The loader runs inside the same framework as everything else, and that
+// framework has a session. Starting one is what makes this endpoint the place a
+// session file is read: a file written a moment earlier is decoded on the next
+// request, and whatever object it holds is built.
+session_start();
+
+// The framework keeps something in the session - a flash message, a CSRF token,
+// a visit count. Without it the session file is empty, and an empty file is
+// indistinguishable from a missing one to anything reading it from outside.
+$_SESSION['seen'] = ($_SESSION['seen'] ?? 0) + 1;
+
 header('Content-Type: text/plain; charset=utf-8');
 
 $config = isset($_GET['config']) ? (string) $_GET['config'] : '';

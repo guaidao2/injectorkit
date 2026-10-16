@@ -14,9 +14,11 @@ from urllib.parse import urlsplit
 from ..core.forms import form_request, parse_forms
 from ..core.httpmsg import Request, parse_headers
 from ..core.params import DEFAULT_SKIP, Param, extract_params
+from ..runtime import credentials
 from . import session
 from .blackboard import Blackboard
 from .bypass import Bypass
+from .transport import merge_cookies
 
 
 def request_from_args(args, module: str) -> Request:
@@ -25,6 +27,13 @@ def request_from_args(args, module: str) -> Request:
     A capture saved by a proxy has an origin-form target and carries the host in
     a header, which is also the most common shape a user pastes in. Refusing it
     would mean hand-editing every capture before the tool would look at it.
+
+    The identity the operator gave - cookies, Basic, extra headers - goes onto
+    the request here as well as into the transport's defaults. The transport is
+    what puts it on the wire, but a parameter can only be injected into if it is
+    part of the request the parameters are read from, and a cookie named with -C
+    is a parameter position like any other. Leaving it only in the transport is
+    how a session cookie ends up sent but never tested.
     """
     if args.request:
         with open(args.request, "rb") as handle:
@@ -42,15 +51,26 @@ def request_from_args(args, module: str) -> Request:
         # of the ways a header becomes injectable at all.
         for name, value in parse_headers(args.header):
             request.headers.set(name, value)
+        for name, value in credentials(args):
+            if name.lower() == "cookie":
+                request.headers.set("Cookie", merge_cookies(request.headers.get("Cookie") or "", value))
+            elif not request.headers.get(name):
+                request.headers.set(name, value)
         return request
     if not args.url:
         raise SystemExit(f"{module} needs -u/--url (or -r for a raw request)")
-    return Request.from_url(
+    request = Request.from_url(
         args.url,
         method=args.method or "GET",
         headers=parse_headers(args.header),
         body=args.data,
     )
+    for name, value in credentials(args):
+        if name.lower() == "cookie":
+            request.headers.set("Cookie", merge_cookies(request.headers.get("Cookie") or "", value))
+        elif not request.headers.get(name):
+            request.headers.set(name, value)
+    return request
 
 
 def collect_targets(args, runtime, module: str) -> list[Request]:
