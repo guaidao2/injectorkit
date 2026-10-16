@@ -18,7 +18,9 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
+from ...core.httpmsg import Request
 from ...core.mutate import Kind
+from ...core.params import Encode, rewrite
 from ...core.protocols import gopher_http
 from ...engine.blackboard import Confidence
 from ...engine.inject import (

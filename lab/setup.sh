@@ -76,16 +76,33 @@ ip addr add 169.254.169.254/32 dev lo 2>/dev/null || true
 nohup python3 "$LAB/internal.py" > "$LAB/logs/internal.log" 2>&1 &
 echo $! > "$LAB/internal.pid"
 
-# A real FastCGI listener on 9000, so the PHP-FPM chain has something that
-# actually executes PHP rather than a stand-in that only knows how to say no.
-if command -v php-cgi >/dev/null 2>&1; then
+# A real FastCGI listener on 9000. A php-fpm pool rather than `php-cgi -b`: both
+# execute PHP, but only php-fpm answers a request for a script that does not
+# exist in the words the fingerprint probe looks for - which is the difference
+# between a port that is usable and a port that is identifiable at all.
+FPM_BIN="$(command -v php-fpm8.4 || command -v php-fpm8.3 || command -v php-fpm8.2 || command -v php-fpm || true)"
+if [ -n "$FPM_BIN" ]; then
     if ! ss -lnt | grep -q '127.0.0.1:9000'; then
-        nohup php-cgi -b 127.0.0.1:9000 > "$LAB/logs/php-cgi.log" 2>&1 &
-        echo $! > "$LAB/phpcgi.pid"
+        cat > /tmp/iklab-fpm.conf <<'EOF'
+[global]
+pid = /tmp/iklab-fpm.pid
+error_log = /tmp/iklab-fpm.log
+daemonize = no
+
+[www]
+listen = 127.0.0.1:9000
+pm = static
+pm.max_children = 4
+user = www-data
+group = www-data
+catch_workers_output = yes
+EOF
+        nohup "$FPM_BIN" --nodaemonize --fpm-config /tmp/iklab-fpm.conf > "$LAB/logs/php-fpm.log" 2>&1 &
+        echo $! > "$LAB/phpfpm.pid"
     fi
-    echo "  php-cgi on 127.0.0.1:9000"
+    echo "  php-fpm ($FPM_BIN) on 127.0.0.1:9000"
 else
-    echo "  php-cgi not installed; 9000 stays closed (PHP-FPM chain cannot be exercised)"
+    echo "  php-fpm not installed; 9000 stays closed (the FastCGI chain cannot be exercised)"
 fi
 sleep 1
 sed -n '1,12p' "$LAB/logs/internal.log"
