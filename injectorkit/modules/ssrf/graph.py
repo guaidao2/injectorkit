@@ -333,9 +333,22 @@ def probe_redirect(ctx: RunContext) -> None:
     Location header.
     """
     oob = ctx.oob
-    if oob is None or not getattr(oob, "running", False) or not hasattr(oob, "new_redirect"):
+    if oob is None or not getattr(oob, "running", False):
         ctx.blackboard.mark_not_covered(
             "probe.redirect", "no listener was given, so the redirect probe was skipped"
+        )
+        return
+    if not getattr(oob, "can_redirect", False):
+        # The two backends are not interchangeable here. A local listener can
+        # answer a request with a Location of its choosing, which is what this
+        # probe is built on; an interactsh deployment only collects callbacks, so
+        # it can tell whether the target reached out but cannot steer where it
+        # goes next. Saying "no listener was given" would be false, and a gap
+        # reported for the wrong reason is worse than no gap at all.
+        ctx.blackboard.mark_not_covered(
+            "probe.redirect",
+            "this callback backend cannot answer with a redirect; run the local listener "
+            "(--oob) instead if the destination has to be chosen by us",
         )
         return
 

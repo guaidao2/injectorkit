@@ -71,6 +71,11 @@ class Blackboard:
     # dead ends: one is a result, the other is an open question.
     not_covered: dict[str, str] = field(default_factory=dict)
     exchanges: list[Exchange] = field(default_factory=list)
+    # Requests the engine did not send itself: the baseline, the page fetched for
+    # --forms. Real traffic, and traffic the operator's budget has to include -
+    # otherwise a run exceeds what was asked for before its first probe fires.
+    # Not persisted: it counts this run, not every run.
+    direct_requests: int = 0
 
     # --------------------------------------------------------------- writing
 
@@ -132,8 +137,12 @@ class Blackboard:
         self.exchanges.append(exchange)
         return exchange
 
+    def count_request(self, count: int = 1) -> None:
+        """Record a request that did not go through the engine's own send."""
+        self.direct_requests += count
+
     def requests_sent(self) -> int:
-        return len(self.exchanges)
+        return len(self.exchanges) + self.direct_requests
 
     # ------------------------------------------------------------ persistence
 

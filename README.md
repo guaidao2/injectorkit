@@ -76,9 +76,48 @@ because a request that names its own identity is more specific than a default.
 Two classes so far. `ssrf` asks what a URL parameter can reach; `proto` asks what
 a path parameter will accept and hand back - `php://filter` source disclosure,
 `data://` execution, `phar://`, `zip://`, `jar:`, `jrt:`, `netdoc://`, and the
-JNDI schemes. With `--exploit`, a `php://filter` chain built on the fly turns an
-`include()` into a shell: `--os-shell` for a live session, `--os-cmd` for one
-command.
+JNDI schemes.
+
+### Getting a shell
+
+Two routes to execution through an `include()` point, and which one applies is
+decided by the target rather than by preference:
+
+- `--exploit` builds a `php://filter` chain on the fly and runs it - `--os-shell`
+  for a live session, `--os-cmd` for one command. This needs the application to
+  accept `php://filter`.
+- `--log-path /var/log/nginx/access.log` plants PHP source in a file the server
+  writes for itself, then includes it. This needs nothing but a plain path, which
+  is what a target refusing every wrapper still allows.
+
+Both run commands on the target, so both require `--exploit`:
+
+    python injectorkit.py proto -u "https://target/" --forms --exploit \
+        --log-path /var/log/nginx/access.log --os-cmd 'id'
+
+### Reaching deserialization
+
+`--make-phar` writes the archive offline, because building one must not require
+PHP to be installed:
+
+    python injectorkit.py proto -u "https://target/" --make-phar evil.phar \
+        --phar-class SomeFrameworkClass --phar-set 'path=/tmp/pwn'
+
+Upload it yourself, then point `--upload` at where it landed. Worth knowing
+before relying on this: on PHP 8, opening a phar does **not** unserialize its
+metadata - only `(new Phar(...))->getMetadata()` does, so the chain needs the
+target to ask for the metadata. Framework code does; a plain `include` does not.
+
+### Running the same scan twice
+
+Progress is kept automatically under `.injectorkit/`, keyed by host and page. An
+action that already ran on a page is not run again, so a second scan of the same
+page costs nothing rather than repeating every request to reach an answer already
+on the board.
+
+    --flush-session     forget what earlier runs learned about this host
+    --state FILE        keep it somewhere of your own instead
+    --retries N         try again after a dropped connection (default: 1)
 
 Findings are printed in colour when a person is reading them, and as plain text
 when the output is a pipe or a file - so nothing parsing it has to strip escape
@@ -86,10 +125,9 @@ sequences. `--color always` and `--color never` override that.
 
 A run in a terminal opens with the project banner. Piped output and `-q` skip it,
 so a script never has to filter it out.
-    python injectorkit.py ssrf -u "http://target/api/fetch?url=x" --oob-interactsh oast.pro
 
 Each vulnerability class is a subcommand with its own options plus the shared
-engine options (transport, bypass budget, session file, verbosity).
+engine options (transport, bypass budget, progress store, verbosity).
 
 ### Callbacks
 

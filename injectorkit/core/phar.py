@@ -1,13 +1,19 @@
 """Building a phar whose metadata is the payload.
 
-Opening a phar at all - `file_exists`, `include`, `file_get_contents`, any of the
-wrappers - makes PHP read the archive's manifest, and the manifest carries a
-serialized metadata blob that PHP unserializes on the way in. That is the whole
-trick: the file never has to be executed, only looked at, so a target that
-merely touches the uploaded path through `phar://` runs the gadgets.
+The manifest carries a serialized metadata blob, and PHP unserializes it when
+something asks for it. What that something is matters, and it is not "any
+phar:// operation" - that is a widely repeated claim that does not hold on PHP 8.
+Measured on 8.4.24 against an archive built here:
 
-Written out by hand rather than with a PHP toolchain, because building one must
-not require PHP to be installed.
+    file_exists / include / file_get_contents / stat
+    opendir / new Phar / count / fopen+fread      - nothing happens
+    (new Phar(...))->getMetadata()                - unserialized
+
+So the chain needs the target to call `getMetadata()`: framework code does, a
+plain `include` does not. Building the archive is still worth having, because
+building one must not require PHP to be installed.
+
+Written out by hand rather than with a PHP toolchain for that reason.
 
 Layout, in order:
 

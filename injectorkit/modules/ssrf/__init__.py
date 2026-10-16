@@ -17,7 +17,16 @@ from ...core.protocols import rebind_host
 from ...engine.blackboard import Blackboard
 from ...engine.bypass import Bypass
 from ...engine.evidence import Judge
-from ...engine.runner import baseline_body, collect_targets, resume_session, select_params
+from ...engine.runner import (
+    baseline_body,
+    close_board,
+    close_filters,
+    collect_targets,
+    open_board,
+    open_filters,
+    run_targets,
+    select_params,
+)
 from ...engine.statemachine import Engine, RunContext
 from . import mutators as _mutators  # noqa: F401  (registers this module's mutators)
 from .graph import build_graph
@@ -72,52 +81,34 @@ def _rebind_name(value: str | None) -> str:
 
 
 def run(args: argparse.Namespace, runtime) -> int:
-    targets = collect_targets(args, runtime, NAME)
-    if len(targets) > 1:
-        runtime.info(f"testing {len(targets)} targets")
-
-    tested = 0
-    for index, request in enumerate(targets, 1):
-        params = select_params(request, args.param, args.max_params, LIKELY_PARAMS)
-        if not params:
-            runtime.info(f"  [{index}/{len(targets)}] no injectable parameter; skipped")
-            continue
-        if len(targets) > 1:
-            runtime.info("")
-            runtime.info(f"=== [{index}/{len(targets)}] {request.describe()} ===")
-        run_one(request, params, args, runtime)
-        tested += 1
-
-    if tested == 0:
-        raise SystemExit(
-            "no injectable parameter found; name one with --param (parameter keys are "
-            "query:<name>, body:<name>, cookie:<name>, json -> <field>, multipart:<name>)"
-        )
-    return 0
+    # One walk over targets, the engine's. This module used to re-implement it,
+    # and the copy quietly lost `extra_headers` - so a header named with -H was
+    # injectable in one subcommand and invisible in this one - along with the
+    # per-target listing the engine's failure message prints.
+    return run_targets(args, runtime, NAME, LIKELY_PARAMS, run_one)
 
 
 def run_one(request: Request, params: list[Param], args: argparse.Namespace, runtime) -> None:
-    blackboard = Blackboard(target=request.host())
-    if args.state:
-        resumed = resume_session(args.state, blackboard.target)
-        if resumed is not None:
-            blackboard = resumed
-            runtime.info(
-                f"  state: {len(blackboard.facts)} facts and {len(blackboard.dead_ends)} closed "
-                f"paths carried over from {args.state}"
-            )
+    blackboard = open_board(args, runtime, request)
+    body, spread, steady = baseline_body(runtime.transport, request, blackboard.count_request)
+    if not steady:
+        runtime.warn(
+            "the page answers two identical requests differently, so a change in it "
+            "cannot be told apart from its own noise"
+        )
     context = RunContext(
         graph=build_graph(NAME),
         transport=runtime.transport,
         blackboard=blackboard,
         judge=Judge(
-            baseline=baseline_body(runtime.transport, request),
+            baseline=body,
+            baseline_spread=spread,
             on_echo=lambda: runtime.warn(
                 "the page reflects the parameter value back; every payload changes the "
                 "response, so the reflection is filtered out before matching"
             ),
         ),
-        bypass=Bypass(blackboard, enabled=not args.no_bypass),
+        bypass=open_filters(args, runtime, request, blackboard),
         oob=runtime.oob,
         pheromone=runtime.pheromone,
         config={
@@ -139,12 +130,18 @@ def run_one(request: Request, params: list[Param], args: argparse.Namespace, run
         max_requests=args.max_requests,
     )
 
-    Engine(context.graph, context).run()
-    runtime.emit("")
-    runtime.emit(blackboard.render())
-    points = blackboard.render_findings()
-    if points:
+    try:
+        Engine(context.graph, context).run()
+    finally:
+        # Written even when the run is interrupted. What was learned before a
+        # Ctrl+C is exactly what a resumed run needs, and dropping it means the
+        # next attempt pays for all of it again - while the priors, which are
+        # cheap to recompute, were being saved all along.
         runtime.emit("")
-        runtime.emit(points)
-    if args.state:
-        blackboard.save(args.state)
+        runtime.emit(blackboard.render())
+        points = blackboard.render_findings()
+        if points:
+            runtime.emit("")
+            runtime.emit(points)
+        close_board(args, blackboard, request)
+        close_filters(args, context.bypass, request)

@@ -57,11 +57,47 @@ class Verdict:
         return self.confirmed
 
 
+def refused(response: Response) -> bool:
+    """Whether a response looks like something refused the request.
+
+    A module-level function rather than only a method, because two places decide
+    this: the judge, when a module asks, and the bypass subsystem, every time a
+    response comes back and the ladder has to know whether to climb. They were
+    separate implementations and only one of them was ever reached - so a fix
+    applied to the other looked like a fix and changed nothing.
+    """
+    if response.error or response.status >= 500 and response.status != 501:
+        # An origin error is a crash, not a refusal.
+        return False
+    if response.status == 429:
+        # Being asked to slow down is a refusal for the ladder's purposes: the
+        # answer did not come from the application, so reading it as evidence
+        # would be reading the limiter's behaviour as the target's. It is kept
+        # out of REFUSAL_STATUSES because a 403 and a 429 mean different things
+        # to the person reading the report.
+        return True
+    if response.status in REFUSAL_STATUSES:
+        return True
+    body = response.text.lower()
+    return any(marker in body for marker in REFUSAL_MARKERS)
+
+
 class Judge:
     """Turns responses into verdicts."""
 
-    def __init__(self, baseline: bytes | None = None, on_echo=None) -> None:
+    def __init__(
+        self,
+        baseline: bytes | None = None,
+        baseline_spread: float = 0.0,
+        on_echo=None,
+    ) -> None:
         self.baseline = (baseline or b"").decode("latin-1", "replace").lower()
+        # How much this target's own response time moved between two identical
+        # requests, measured before anything was injected. A spread, not an
+        # interquartile range: there are two samples at that point, and calling
+        # it an IQR would be naming it for a statistic it is not. It is the noise
+        # floor a timing verdict has to stand outside.
+        self.baseline_spread = baseline_spread
         self.on_echo = on_echo
         self._said_echo = False
 
@@ -159,13 +195,7 @@ class Judge:
 
     def refused(self, response: Response) -> bool:
         """Whether a response looks like something refused the request."""
-        if response.error or response.status >= 500 and response.status != 501:
-            # An origin error is a crash, not a refusal.
-            return False
-        if response.status in REFUSAL_STATUSES:
-            return True
-        body = response.text.lower()
-        return any(marker in body for marker in REFUSAL_MARKERS)
+        return refused(response)
 
     # ---------------------------------------------------------------- timing
 
@@ -173,7 +203,7 @@ class Judge:
         self,
         samples: Sequence[float],
         expected: float,
-        baseline_iqr: float = 0.0,
+        baseline_spread: float | None = None,
         min_signal: float = 0.15,
     ) -> Verdict:
         """Judge a delay by whether it is the delay that was asked for.
@@ -181,8 +211,17 @@ class Judge:
         Statistics, not a stopwatch. The median has to sit inside the band the
         payload requested - a request that took far longer than asked is
         measuring something else, such as another probe holding the connection -
-        and it has to stand well outside the target's own variation.
+        and it has to stand well outside the target's own variation. That
+        variation comes from the judge, measured before the run started, unless a
+        caller has a reason to pass its own.
+
+        No probe in the toolkit calls this yet: nothing here sends a payload that
+        is meant to be slow. It exists for the time-based techniques, and is
+        wired to the baseline so that the first one to use it gets a real floor
+        rather than zero.
         """
+        if baseline_spread is None:
+            baseline_spread = self.baseline_spread
         if not samples:
             return Verdict(reason="no timing samples")
         median = statistics.median(samples)
@@ -191,8 +230,8 @@ class Judge:
         if median > expected * 1.6:
             return Verdict(reason=f"median {median:.3f}s is far above the requested delay")
         spread = _iqr(list(samples))
-        threshold = max(3 * max(baseline_iqr, spread), min_signal)
-        if median - (baseline_iqr or 0.0) < threshold:
+        threshold = max(3 * max(baseline_spread, spread), min_signal)
+        if median - (baseline_spread or 0.0) < threshold:
             return Verdict(reason="the delay is inside the target's own variation")
         return Verdict(
             confirmed=True,

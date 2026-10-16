@@ -217,5 +217,52 @@ class AReflectionIsReported(unittest.TestCase):
         self.assertFalse(verdict.confirmed)
 
 
+class RateLimitedIsNotEvidence(unittest.TestCase):
+    """A 429 that outlived its retries is a refusal, not an answer.
+
+    429 is deliberately not in REFUSAL_STATUSES - a 403 and a 429 mean different
+    things to the person reading the report - but the ladder has to treat it as
+    a refusal all the same, or being throttled reads as a target with nothing in
+    it and the escalation stops climbing.
+    """
+
+    def test_a_429_counts_as_refused(self):
+        self.assertTrue(Judge().refused(response(b"", status=429)))
+
+    def test_other_refusals_still_count(self):
+        self.assertTrue(Judge().refused(response(b"", status=403)))
+
+    def test_an_origin_error_is_still_not_a_refusal(self):
+        self.assertFalse(Judge().refused(response(b"", status=500)))
+
+    def test_a_normal_answer_is_not_a_refusal(self):
+        self.assertFalse(Judge().refused(response(b"<html>fine</html>")))
+
+
+class TimingUsesTheTargetsOwnVariation(unittest.TestCase):
+    """A delay means nothing unless it stands outside the target's normal noise.
+
+    The judge carries that noise from the run's start, where it was measured by
+    asking the same question twice. Nothing measured it before, so the floor was
+    always zero and every delay looked like a signal.
+    """
+
+    def test_a_delay_inside_the_noise_is_not_a_finding(self):
+        self.assertFalse(Judge(baseline_spread=0.5).timing([1.0], expected=1.0).confirmed)
+
+    def test_the_same_delay_is_a_finding_on_a_steady_target(self):
+        self.assertTrue(Judge(baseline_spread=0.01).timing([1.0], expected=1.0).confirmed)
+
+    def test_a_caller_can_still_pass_its_own_measurement(self):
+        judge = Judge(baseline_spread=0.5)
+        self.assertTrue(judge.timing([1.0], expected=1.0, baseline_spread=0.01).confirmed)
+
+    def test_a_delay_far_above_what_was_asked_for_is_not_a_finding(self):
+        self.assertFalse(Judge().timing([5.0], expected=1.0).confirmed)
+
+    def test_a_delay_below_what_was_asked_for_is_not_a_finding(self):
+        self.assertFalse(Judge().timing([0.05], expected=1.0).confirmed)
+
+
 if __name__ == "__main__":
     unittest.main()

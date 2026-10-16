@@ -99,6 +99,36 @@ def _runtime_of(wrapper: Wrapper) -> str:
     return "unknown"
 
 
+# What a file that was actually read tends to leave behind. A wrapper's own
+# signatures describe the files it is usually aimed at, which is fine while the
+# tool is picking the files. The moment an operator names one - a flag, a config,
+# a key - nobody knows what is in it, and judging a successful read by whether it
+# contains `root:x:0:0` reports the one file someone actually wanted as nothing
+# at all. The baseline is what keeps this honest: a signature the page already
+# prints is refused before it is ever matched.
+NAMED_FILE_SIGNATURES = (
+    "flag{",
+    "FLAG{",
+    "ctf{",
+    "CTF{",
+    "root:x:0:0",
+    "<?php",
+    "for 16-bit app support",
+    "[fonts]",
+    "-----BEGIN",
+    "DB_PASSWORD",
+    "SECRET_KEY",
+    "private_key",
+)
+
+
+def _signatures_for(wrapper: Wrapper, named: bool) -> tuple[str, ...]:
+    """What counts as proof, which depends on whether the file was named."""
+    if not named:
+        return tuple(wrapper.signatures)
+    return tuple(wrapper.signatures) + NAMED_FILE_SIGNATURES
+
+
 def _proven(ctx: RunContext, wrapper: Wrapper, param, variant, request, verdict, note: str = "") -> None:
     """Record a wrapper that answered, as a finding and on the board."""
     entry = {
@@ -151,7 +181,10 @@ def _try_wrapper(ctx: RunContext, param, wrapper: Wrapper, action: str, targets:
         if exchange.response.error:
             continue
         verdict = ctx.judge.signature(
-            exchange.response, wrapper.signatures, variant.value, param.value
+            exchange.response,
+            _signatures_for(wrapper, bool(ctx.config.get("read"))),
+            variant.value,
+            param.value,
         )
         if not verdict.confirmed:
             continue

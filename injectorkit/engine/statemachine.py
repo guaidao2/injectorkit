@@ -16,7 +16,7 @@ import traceback
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .blackboard import Blackboard
+from .blackboard import Blackboard, Confidence
 from .bypass import Bypass
 from .evidence import Judge
 from .transport import Transport
@@ -195,6 +195,10 @@ class Engine:
                 if self.ctx.blackboard.is_dead(action.id):
                     self.ctx.log(f"   already ruled out: {action.description}")
                     continue
+                done = f"ran.{action.id}"
+                if self.ctx.blackboard.has(done):
+                    self.ctx.info(f"skipping {action.description}: already tried on this page")
+                    continue
                 self.ctx.info(f"testing {action.description}")
                 try:
                     action.run(self.ctx)
@@ -203,6 +207,17 @@ class Engine:
                     self.ctx.blackboard.mark_dead_end(action.id, f"raised {type(error).__name__}: {error}")
                     if self.ctx.config.get("traceback"):
                         self.ctx.log(traceback.format_exc())
+                finally:
+                    # Recorded whether it worked or not. "This page has been
+                    # tried" is the fact that saves the next run the work; a
+                    # target that refused once is not asked again unless the
+                    # operator asks for a fresh start with --flush-session.
+                    self.ctx.blackboard.add(
+                        done,
+                        True,
+                        evidence="tried on this page",
+                        confidence=Confidence.LIKELY,
+                    )
 
                 # An action may decide the state is finished with, which is how a
                 # conclusive early answer skips the rest of a state's work.

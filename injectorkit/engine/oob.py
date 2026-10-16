@@ -91,6 +91,11 @@ class OOBListener:
     def running(self) -> bool:
         return self._server is not None
 
+    # A local listener can answer a request with a Location of its choosing,
+    # which is what a redirect-based bypass is built on. The field exists so a
+    # backend that cannot do it says so, rather than being reported as absent.
+    can_redirect = True
+
     # ----------------------------------------------------------------- tokens
 
     def new_url(self, label: str) -> tuple[str, str]:

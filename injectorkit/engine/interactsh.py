@@ -178,6 +178,12 @@ class InteractshClient:
     def running(self) -> bool:
         return bool(self.correlation_id and self._key is not None)
 
+    # An interactsh deployment collects callbacks; it cannot answer a request
+    # with a Location we choose, so a redirect-based bypass has nothing to stand
+    # on. Declared rather than left to `hasattr`, so a caller can say why the
+    # capability is missing instead of guessing.
+    can_redirect = False
+
     # ----------------------------------------------------------------- tokens
 
     def new_url(self, label: str) -> tuple[str, str]:

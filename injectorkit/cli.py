@@ -70,6 +70,13 @@ def add_engine_flags(parser: argparse.ArgumentParser) -> None:
     engine.add_argument("--verify-tls", action="store_true", help="verify TLS certificates (off by default)")
     engine.add_argument("--follow-redirects", action="store_true", help="follow redirects instead of reading them")
     engine.add_argument("--delay", type=float, default=0.0, help="pause between requests, in seconds")
+    engine.add_argument(
+        "--retries",
+        type=int,
+        default=1,
+        help="how many times to try again after a connection drops (default: 1). An HTTP "
+        "status is never retried - that is the server answering",
+    )
     engine.add_argument("--max-requests", type=int, default=300, help="request budget for the run")
     engine.add_argument("--no-bypass", action="store_true", help="do not track filter behaviour or escalate")
     engine.add_argument(
@@ -86,7 +93,13 @@ def add_engine_flags(parser: argparse.ArgumentParser) -> None:
     engine.add_argument(
         "--state",
         metavar="FILE",
-        help="save progress here and resume from it (scan state, not an authenticated session)",
+        help="save progress to this file and resume from it, instead of the automatic "
+        "store under .injectorkit/ (scan state, not an authenticated session)",
+    )
+    engine.add_argument(
+        "--flush-session",
+        action="store_true",
+        help="forget what earlier runs learned about this host before starting",
     )
     engine.add_argument(
         "--forms",

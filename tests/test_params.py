@@ -12,7 +12,7 @@ import unittest
 from urllib.parse import parse_qs, urlsplit
 
 from injectorkit.core.httpmsg import Headers, Request
-from injectorkit.core.params import Encode, Where, extract_params, pollute, rewrite
+from injectorkit.core.params import Encode, Param, Where, extract_params, pollute, rewrite
 
 
 def params_of(request):
@@ -203,6 +203,21 @@ class Pollution(unittest.TestCase):
         self.assertEqual(values[0], "http://example.com")
         self.assertEqual(values[-1], "file:///etc/passwd")
 
+    def test_a_header_cannot_be_polluted_even_when_it_is_named(self):
+        # The same finding stated from the other side: naming a header with -H
+        # makes it injectable, but it does not make duplication possible.
+        request = Request(
+            method="GET", url="http://t/f", headers=Headers([("X-Forwarded-Host", "clean")])
+        )
+        param = Param(
+            where=Where.HEADER,
+            name="X-Forwarded-Host",
+            value="clean",
+            header="X-Forwarded-Host",
+        )
+        dirty = pollute(request, param, "evil")
+        self.assertEqual(list(dirty.headers), [("X-Forwarded-Host", "clean")])
+
     def test_the_original_request_is_left_alone(self):
         request = Request.from_url("http://t/f?url=http://example.com")
         param = params_of(request)["query:url"]
@@ -247,14 +262,18 @@ class HeadersAsParameters(unittest.TestCase):
         changed = rewrite(request, param, "http://169.254.169.254/", Encode.URL)
         self.assertEqual(changed.headers.get("Referer"), "http%3A%2F%2F169.254.169.254%2F")
 
-    def test_a_duplicated_header_keeps_the_original_first(self):
-        # The same disagreement as a duplicated query parameter, in a place
-        # fewer filters watch: a filter reading the first value and a framework
-        # keeping the last are looking at different strings.
-        request = Request(method="GET", url="http://t/f", headers=Headers([("X-Forwarded-For", "127.0.0.1")]))
+    def test_a_header_is_not_polluted(self):
+        # Not because the technique is worthless, but because the transport
+        # cannot perform it: `urllib` holds headers in a dict and replaces by
+        # name, so a second occurrence is collapsed before the request leaves.
+        # A model-level duplicate would be recorded as tried and change nothing
+        # on the wire - which is exactly what a test at this layer cannot see.
+        request = Request(
+            method="GET", url="http://t/f", headers=Headers([("X-Forwarded-For", "127.0.0.1")])
+        )
         param = params_of(request)["header:X-Forwarded-For"]
         dirty = pollute(request, param, "169.254.169.254", Encode.NONE)
-        self.assertEqual(dirty.headers.get_all("X-Forwarded-For"), ["127.0.0.1", "169.254.169.254"])
+        self.assertEqual(dirty.headers.get_all("X-Forwarded-For"), ["127.0.0.1"])
 
     def test_an_unnamed_header_counts_when_the_operator_named_it(self):
         # -H is how a house authentication header gets in: the tool cannot know
@@ -263,6 +282,81 @@ class HeadersAsParameters(unittest.TestCase):
         self.assertNotIn("header:X-Tenant", params_of(request))
         named = {param.key() for param in extract_params(request, extra_headers=frozenset({"x-tenant"}))}
         self.assertIn("header:X-Tenant", named)
+
+
+class MultipartRewrite(unittest.TestCase):
+    """Rewriting a part, which had no test at all until a filename bug slipped past.
+
+    Extraction was covered and rewriting was not, so the filename position could
+    be extracted, handed to the injector, and silently never reach the payload.
+    """
+
+    BOUNDARY = "----ik"
+
+    def request(self) -> Request:
+        body = (
+            f"--{self.BOUNDARY}\r\n"
+            f'Content-Disposition: form-data; name="url"\r\n\r\n'
+            f"http://example.com\r\n"
+            f"--{self.BOUNDARY}\r\n"
+            f'Content-Disposition: form-data; name="avatar"; filename="photo.png"\r\n'
+            f"Content-Type: image/png\r\n\r\nPNGDATA\r\n"
+            f"--{self.BOUNDARY}--\r\n"
+        ).encode()
+        return Request(
+            method="POST",
+            url="http://t/upload",
+            headers=Headers([("Content-Type", f"multipart/form-data; boundary={self.BOUNDARY}")]),
+            body=body,
+        )
+
+    def test_a_field_value_is_replaced(self):
+        request = self.request()
+        param = params_of(request)["multipart:url"]
+        out = rewrite(request, param, "PAYLOAD", Encode.NONE)
+        self.assertIn(b"PAYLOAD", out.body)
+        self.assertNotIn(b"http://example.com", out.body)
+
+    def test_a_filename_is_replaced(self):
+        request = self.request()
+        param = params_of(request)["multipart-filename:avatar"]
+        out = rewrite(request, param, "shell.php", Encode.NONE)
+        self.assertIn(b'filename="shell.php"', out.body)
+        self.assertNotIn(b"photo.png", out.body)
+
+    def test_the_part_content_survives_a_filename_change(self):
+        # Only the name is the payload; the bytes the browser was sending stay.
+        request = self.request()
+        param = params_of(request)["multipart-filename:avatar"]
+        out = rewrite(request, param, "shell.php", Encode.NONE)
+        self.assertIn(b"PNGDATA", out.body)
+
+    def test_the_other_part_is_untouched(self):
+        request = self.request()
+        param = params_of(request)["multipart-filename:avatar"]
+        out = rewrite(request, param, "shell.php", Encode.NONE)
+        self.assertIn(b"http://example.com", out.body)
+
+    def test_the_body_stays_well_formed(self):
+        request = self.request()
+        param = params_of(request)["multipart:url"]
+        out = rewrite(request, param, "PAYLOAD", Encode.NONE)
+        text = out.body.decode("latin-1")
+        self.assertEqual(text.count(f"--{self.BOUNDARY}"), 3)
+        self.assertTrue(text.endswith(f"--{self.BOUNDARY}--\r\n"))
+
+    def test_content_length_matches_the_body(self):
+        request = self.request()
+        param = params_of(request)["multipart:url"]
+        out = rewrite(request, param, "PAYLOAD", Encode.NONE)
+        self.assertEqual(out.headers.get("Content-Length"), str(len(out.body)))
+
+    def test_the_original_request_is_left_alone(self):
+        request = self.request()
+        before = request.body
+        param = params_of(request)["multipart:url"]
+        rewrite(request, param, "PAYLOAD", Encode.NONE)
+        self.assertEqual(request.body, before)
 
 
 class Encoding(unittest.TestCase):

@@ -146,6 +146,7 @@ def build_transport(args: argparse.Namespace) -> Transport:
             user_agent=args.user_agent,
             random_user_agent=args.random_ua,
             delay=args.delay,
+            retries=getattr(args, "retries", 0),
         )
     )
 

@@ -14,7 +14,9 @@ from urllib.parse import urlsplit
 from ..core.forms import form_request, parse_forms
 from ..core.httpmsg import Request, parse_headers
 from ..core.params import DEFAULT_SKIP, Param, extract_params
+from . import session
 from .blackboard import Blackboard
+from .bypass import Bypass
 
 
 def request_from_args(args, module: str) -> Request:
@@ -86,17 +88,37 @@ def requests_from_batch(path: str) -> list[Request]:
     return targets
 
 
-def baseline_body(transport, request: Request) -> bytes | None:
-    """The page's own answer, with nothing injected into it.
+def baseline_body(transport, request: Request, note=None) -> tuple[bytes | None, float, bool]:
+    """The page's own answer, asked for twice, and what that says about it.
 
     A page that already prints "root:x:0:0" in a code sample answers every probe
     with it, and a judge that only looks at the probe calls that a finding. The
     response this same request produces untouched is what tells a result apart
-    from the page's own content - so it is fetched once per target and handed to
-    the judge, rather than guessed at inside it.
+    from the page's own content - so it is fetched here and handed to the judge,
+    rather than guessed at inside it.
+
+    Twice, because one sample cannot tell a stable page from an unstable one and
+    every comparison afterwards is against this. The second request also gives
+    the spread a timing check needs: a delay judged against a target that answers
+    in 20ms once and 900ms the next time means nothing. Returns the body, the
+    spread between the two responses, and whether they agreed.
+
+    `note` is called once per request sent, because these are real traffic and
+    the budget the operator set has to include them.
     """
-    response = transport.send(request)
-    return None if response.error else response.body
+    def fetch():
+        response = transport.send(request)
+        if note is not None:
+            note()
+        return response
+
+    first = fetch()
+    if first.error:
+        return None, 0.0, True
+    second = fetch()
+    if second.error:
+        return first.body, 0.0, True
+    return first.body, abs(first.elapsed - second.elapsed), first.body == second.body
 
 
 def requests_from_forms(request: Request, runtime) -> list[Request]:
@@ -242,23 +264,75 @@ def run_targets(args, runtime, module: str, likely: frozenset[str], handler) -> 
 
 
 def open_board(args, runtime, request: Request) -> Blackboard:
-    """A board for this target, resumed from a state file when there is one."""
+    """A board for this target: an explicit state file, or the automatic store.
+
+    Progress is kept by default, keyed by host and path, so running the same scan
+    again does not repeat what it already worked out. `--state` names a file by
+    hand instead, and `--flush-session` throws the automatic store away for this
+    host before anything is read from it.
+    """
     board = Blackboard(target=request.host())
-    if getattr(args, "state", None):
-        resumed = resume_session(args.state, board.target)
+
+    if getattr(args, "flush_session", False) and session.flush(request.url):
+        runtime.info("forgot what an earlier run learned about this host")
+
+    explicit = getattr(args, "state", None)
+    if explicit:
+        resumed = resume_session(explicit, board.target)
         if resumed is not None:
             board = resumed
+            runtime.warn(
+                f"carried over {len(board.facts)} facts and "
+                f"{len(board.dead_ends)} closed paths from {explicit}"
+            )
+        return board
+
+    text = session.load(request.url)
+    if text:
+        try:
+            resumed = Blackboard.from_json(text)
+        except ValueError:
+            resumed = None
+        if resumed is not None and resumed.target == board.target:
+            board = resumed
             runtime.info(
-                f"  state: {len(board.facts)} facts and {len(board.dead_ends)} closed paths "
-                f"carried over from {args.state}"
+                f"resuming: {len(board.facts)} facts and {len(board.dead_ends)} closed "
+                f"paths from an earlier run on this page (--flush-session forgets them)"
             )
     return board
 
 
-def close_board(args, board: Blackboard) -> None:
-    """Keep what was learned, when the operator asked for a state file."""
-    if getattr(args, "state", None):
-        board.save(args.state)
+def close_board(args, board: Blackboard, request: Request) -> None:
+    """Keep what was learned, so the next run on this page starts from it."""
+    explicit = getattr(args, "state", None)
+    if explicit:
+        board.save(explicit)
+        return
+    session.save(request.url, board.to_json())
+
+
+def open_filters(args, runtime, request: Request, board: Blackboard) -> Bypass:
+    """The filter profile for this host, resumed when there is one to resume.
+
+    The profile is bought with refused requests - the refusal count, the refused
+    spellings, the generation a value first got through - and re-earning it on
+    the next run costs exactly what it cost the first. A target that has already
+    shown it hates `gopher://` should not have to show it again.
+    """
+    bypass = Bypass(board, enabled=not getattr(args, "no_bypass", False))
+    if getattr(args, "flush_session", False):
+        return bypass
+    remembered = session.load_filters(request.url)
+    if remembered:
+        loaded = bypass.load_json(remembered)
+        if loaded:
+            runtime.info(f"resuming what earlier runs learned about the filter here")
+    return bypass
+
+
+def close_filters(args, bypass: Bypass, request: Request) -> None:
+    """Keep what this run learned about the target's filters."""
+    session.save_filters(request.url, bypass.to_json())
 
 
 def resume_session(path: str, target: str) -> Blackboard | None:
