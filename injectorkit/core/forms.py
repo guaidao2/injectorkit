@@ -116,14 +116,45 @@ def form_request(form: Form, base_url: str) -> Request:
     return Request.from_url(action, method="POST", body=urlencode(pairs))
 
 
-def encode_multipart(pairs: list[tuple[str, str]], boundary: str) -> bytes:
-    """A multipart body, with CRLF where the format says CRLF."""
+@dataclass
+class FilePart:
+    """One file in a multipart body: the field it goes in, and what it is called."""
+
+    field: str
+    filename: str
+    content: bytes
+    content_type: str = "application/octet-stream"
+
+
+def encode_multipart(
+    pairs: list[tuple[str, str]],
+    boundary: str,
+    files: list[FilePart] | None = None,
+) -> bytes:
+    """A multipart body, with CRLF where the format says CRLF.
+
+    A file part is not a field part with a long value. It carries a `filename`,
+    and an empty `Content-Type` where a field has none - the two differences that
+    decide whether a server treats it as an upload or as a string, and a body
+    that gets them wrong is answered by a form parser that simply ignores it.
+    """
     lines: list[bytes] = []
     for name, value in pairs:
         lines.append(f"--{boundary}".encode())
         lines.append(f'Content-Disposition: form-data; name="{name}"'.encode())
         lines.append(b"")
         lines.append(str(value).encode("utf-8"))
+
+    for part in files or []:
+        lines.append(f"--{boundary}".encode())
+        lines.append(
+            f'Content-Disposition: form-data; name="{part.field}"; '
+            f'filename="{part.filename}"'.encode()
+        )
+        lines.append(f"Content-Type: {part.content_type}".encode())
+        lines.append(b"")
+        lines.append(part.content)
+
     lines.append(f"--{boundary}--".encode())
     lines.append(b"")
     return b"\r\n".join(lines)

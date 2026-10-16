@@ -203,13 +203,23 @@ class Blackboard:
                 out.extend(item for item in value if isinstance(item, dict))
         return out
 
+    # How wide a payload may be before the block stops printing it whole.
+    # A short payload is worth copying by hand - that is what a finding is for.
+    # A generated filter chain is twelve thousand characters of iconv names, and
+    # nobody has ever retyped one: it is rebuilt, not transcribed, so the block
+    # says what it was and how long, and leaves the bytes to the session file.
+    PAYLOAD_WIDTH = 200
+
     def render_findings(self) -> str:
         """The injection points as a block, the way a report is read.
 
         One block per finding: what was injected, where, and with what. A
         summary that names a technique but withholds the payload cannot be
         reproduced by hand, and reproducing it by hand is the only thing anyone
-        does with a finding.
+        does with a finding - but that holds for payloads a person can read. One
+        that is twelve thousand characters long is reproduced by asking the tool
+        for it again, so printing it whole costs a screen and tells the reader
+        nothing they can use.
         """
         found = self.findings()
         if not found:
@@ -221,13 +231,34 @@ class Blackboard:
                 lines.append(f"    Test:     {item['name']}")
             if item.get("family"):
                 lines.append(f"    Family:   {item['family']}")
-            if item.get("payload"):
-                lines.append(f"    Payload:  {item['payload']}")
+            payload = str(item.get("payload") or "")
+            if payload:
+                lines.append(f"    Payload:  {self._readable_payload(payload)}")
             if item.get("evidence"):
                 lines.append(f"    Evidence: {item['evidence']}")
             lines.append("")
         lines.append("---")
         return "\n".join(lines)
+
+    def _readable_payload(self, payload: str) -> str:
+        """The payload if it can be read, and a description of it if it cannot."""
+        if len(payload) <= self.PAYLOAD_WIDTH:
+            return payload
+        head = payload[: self.PAYLOAD_WIDTH].rstrip()
+        return (
+            f"{head}\n"
+            f"              ... {len(payload)} characters in all, generated at run time. "
+            "The full value is in the session file"
+        )
+
+    # Facts that record what the run did rather than what it found. "This page
+    # has been tried" is what saves the next run the work, and it belongs in the
+    # session file - not in the summary, where it reads as a result and buries
+    # the one line that is one.
+    BOOKKEEPING = ("ran.",)
+
+    def is_bookkeeping(self, key: str) -> bool:
+        return key.startswith(self.BOOKKEEPING)
 
     def render(self) -> str:
         """Human-readable summary, printed at the end of a run.
@@ -236,11 +267,17 @@ class Blackboard:
         does: `[+]` what was proved, `[-]` what was tried and ruled out, `[?]`
         what was never tried. Those last two are different answers, and a board
         that renders them the same way is not reporting.
+
+        What the run *did* stays out of it. A dozen `ran.<action> = True` lines
+        are a record for the next run, and printing them beside the findings
+        makes the findings harder to find - which is the opposite of what a
+        summary is for. `-v` prints them for anyone who wants them.
         """
         lines = [f"[*] target: {self.target}"]
-        if not self.facts:
+        results = [key for key in sorted(self.facts) if not self.is_bookkeeping(key)]
+        if not results:
             lines.append("    (nothing was proved)")
-        for key in sorted(self.facts):
+        for key in results:
             lines.append(f"[+] {self.facts[key].describe()}")
         if self.dead_ends:
             lines.append("[-] closed paths:")
@@ -251,4 +288,15 @@ class Blackboard:
             for key in sorted(self.not_covered):
                 lines.append(f"[?] {key}: {self.not_covered[key]}")
         lines.append(f"[*] requests sent: {self.requests_sent()}")
+        return "\n".join(lines)
+
+    def render_bookkeeping(self) -> str:
+        """What the run did, for -v: which actions were tried on this page."""
+        keys = [key for key in sorted(self.facts) if self.is_bookkeeping(key)]
+        if not keys:
+            return ""
+        lines = ["[*] actions tried on this page:"]
+        for key in keys:
+            action = key[len("ran.") :]
+            lines.append(f"    {action}")
         return "\n".join(lines)

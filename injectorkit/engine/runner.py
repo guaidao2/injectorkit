@@ -88,6 +88,21 @@ def requests_from_batch(path: str) -> list[Request]:
     return targets
 
 
+def emit_summary(runtime, board, args) -> None:
+    """Print the run's result, then - only with -v - the list of what it did.
+
+    The bookkeeping exists so the next run can skip this page. It is not a
+    result, and printing it among the results is what makes a report unreadable.
+    """
+    runtime.emit("")
+    runtime.emit(board.render())
+    if getattr(args, "verbose", 0):
+        tried = board.render_bookkeeping()
+        if tried:
+            runtime.emit("")
+            runtime.emit(tried)
+
+
 def baseline_body(transport, request: Request, note=None) -> tuple[bytes | None, float, bool]:
     """The page's own answer, asked for twice, and what that says about it.
 

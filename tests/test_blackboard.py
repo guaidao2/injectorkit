@@ -124,5 +124,67 @@ class TrafficCount(unittest.TestCase):
         self.assertEqual(board.requests_sent(), 1)
 
 
+class WhatTheSummaryShows(unittest.TestCase):
+    """A summary is for reading, and a run produces two kinds of line.
+
+    A finding is a result. "This action has been tried" is bookkeeping - it
+    exists so the next run can skip this page, and printing it beside the
+    findings is how a report becomes unreadable.
+    """
+
+    def board_with(self, finding_payload: str) -> Blackboard:
+        board = Blackboard(target="t")
+        # One dict: `add` collects values under a key, so it wraps what it is
+        # given. Handing it a list would nest one inside the other and the
+        # finding would not be found - which is how this test first failed.
+        board.add(
+            "proto.findings",
+            {
+                "name": "plain-system",
+                "param": "body:file",
+                "family": "read",
+                "payload": finding_payload,
+                "evidence": "signature present",
+            },
+            evidence="a finding",
+        )
+        board.add("ran.probe.read", True, evidence="tried on this page", confidence=Confidence.LIKELY)
+        board.add("ran.classify", True, evidence="tried on this page", confidence=Confidence.LIKELY)
+        return board
+
+    def test_bookkeeping_stays_out_of_the_summary(self):
+        rendered = self.board_with("/etc/passwd").render()
+        self.assertNotIn("ran.probe.read", rendered)
+        self.assertNotIn("ran.classify", rendered)
+        self.assertNotIn("tried on this page", rendered)
+
+    def test_the_finding_is_still_there(self):
+        rendered = self.board_with("/etc/passwd").render()
+        self.assertIn("proto.findings", rendered)
+
+    def test_bookkeeping_can_be_asked_for(self):
+        tried = self.board_with("/etc/passwd").render_bookkeeping()
+        self.assertIn("probe.read", tried)
+        self.assertIn("classify", tried)
+
+    def test_a_short_payload_is_printed_in_full(self):
+        # A payload somebody can retype by hand is the point of a finding.
+        block = self.board_with("id=1 AND 2290=2290").render_findings()
+        self.assertIn("id=1 AND 2290=2290", block)
+
+    def test_a_generated_payload_is_summarised(self):
+        # A twelve-thousand-character filter chain is rebuilt, not transcribed.
+        # Printing it whole costs a screen and gives the reader nothing.
+        long_payload = "php://filter/" + "convert.iconv.A.B|" * 500
+        block = self.board_with(long_payload).render_findings()
+        self.assertNotIn(long_payload, block)
+        self.assertIn("characters in all", block)
+
+    def test_the_summary_still_says_it_was_generated(self):
+        long_payload = "php://filter/" + "convert.iconv.A.B|" * 500
+        block = self.board_with(long_payload).render_findings()
+        self.assertIn("php://filter/convert.iconv", block)
+
+
 if __name__ == "__main__":
     unittest.main()

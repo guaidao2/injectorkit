@@ -326,6 +326,41 @@ Input is read line by line, so a pipe works as well as a terminal:
 
     printf 'id\nexit\n' | python injectorkit.py proto -u "..." --os-shell
 
+### When the target refuses every wrapper
+
+A `php://filter` chain needs the application to accept `php://filter`. Plenty
+refuse every scheme spelling while still handing the value straight to
+`include()`:
+
+    file=/etc/passwd                 -> root:x:0:0:...
+    file=php://filter/...            -> Error: Invalid input
+    file=file:///flag                -> Error: Invalid input
+    file=phar://...                  -> Error: Invalid input
+
+A plain path is all that survives, and a plain path is what the access log is.
+Point `--log-path` at it, and the code goes into the file the server writes for
+itself - through the `User-Agent`, which both nginx and apache record as sent:
+
+    python injectorkit.py proto -u "https://target/" --forms --exploit \
+        --log-path /var/log/nginx/access.log --os-cmd 'cat /var/www/html/flag.php'
+
+The path differs by server; `/var/log/apache2/access.log` is the other common
+one. Two things decide whether it works, and both fail in ways that look like
+something else:
+
+- **The file has to be readable by the user the application runs as.** Apache's
+  own log is `640 root:adm`; a vhost's log is usually `644`. An unreadable log
+  answers with the page and no error, which reads as "the code did not run".
+- **The file has to be small enough to be included whole.** The payload lands at
+  the end, so a log that has been running for weeks never gets that far - the
+  response stops partway through and the marker is simply absent. Empty or rotate
+  it first. The tool says which of the two it saw.
+
+The payload quotes the array key with single quotes. Apache escapes double quotes
+in a request line as it writes them, so `$_GET["c"]` lands in the log with
+backslashes in it and including that file is a parse error rather than a command.
+Single quotes need no escaping, and PHP reads the key either way.
+
 ### What it does not do
 
 It does not build the archive a `phar://` probe needs, and it does not upload

@@ -12,6 +12,9 @@ tools/
 # the README is the document of record that ships.
 docs/
 
+# Development notes: manual write-ups of targets used to test the tool.
+evidence/
+
 __pycache__/
 *.py[cod]
 .tmp/

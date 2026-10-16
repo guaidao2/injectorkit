@@ -37,7 +37,7 @@ a2dissite 000-default >/dev/null 2>&1 || true
 if grep -qE '^Listen 80$' /etc/apache2/ports.conf; then
     sed -i 's|^Listen 80$|#Listen 80  # disabled by the injectorkit lab|' /etc/apache2/ports.conf
 fi
-cat > /etc/apache2/sites-available/injectorkit-lab.conf <<EOF
+cat > /etc/apache2/sites-available/000-default.conf <<EOF
 Listen $PORT
 <VirtualHost *:$PORT>
     ServerName injectorkit-lab
@@ -52,7 +52,7 @@ Listen $PORT
 </VirtualHost>
 EOF
 a2enmod php8.4 >/dev/null 2>&1 || a2enmod php >/dev/null 2>&1 || true
-a2ensite injectorkit-lab >/dev/null
+a2ensite 000-default >/dev/null
 apache2ctl configtest
 systemctl restart apache2
 

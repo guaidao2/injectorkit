@@ -50,11 +50,17 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "walked past by spelling anything differently - this is the way past it",
     )
 
-    exploit = parser.add_argument_group("exploitation")
+    exploit = parser.add_argument_group(
+        "exploitation",
+        "Off by default. Without --exploit the run only fingerprints what the parameter can "
+        "reach; nothing is written and no command is sent.",
+    )
     exploit.add_argument(
         "--exploit",
         action="store_true",
-        help="act on fingerprinted services: write a file through Redis, or run code through PHP-FPM",
+        help="act on the services that were fingerprinted: write a file through Redis (needs "
+        "--webroot), or run a command through PHP-FPM (needs --fpm-script). Each chain first "
+        "asks the service whether it will allow it, so a hardened target is reported as such",
     )
     exploit.add_argument("--webroot", metavar="DIR", help="a web-accessible directory on the target, for the Redis chain")
     exploit.add_argument("--shell-name", metavar="FILE", help="filename to write the shell as")
@@ -139,6 +145,11 @@ def run_one(request: Request, params: list[Param], args: argparse.Namespace, run
         # cheap to recompute, were being saved all along.
         runtime.emit("")
         runtime.emit(blackboard.render())
+        if getattr(args, "verbose", 0):
+            tried = blackboard.render_bookkeeping()
+            if tried:
+                runtime.emit("")
+                runtime.emit(tried)
         points = blackboard.render_findings()
         if points:
             runtime.emit("")

