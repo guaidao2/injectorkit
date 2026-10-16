@@ -241,7 +241,43 @@ class Engine:
                 current = state.on_exhausted
                 continue
             break
+
+        self._recalibrate_if_barren()
         return self.ctx.blackboard
+
+    def _recalibrate_if_barren(self) -> None:
+        """When the run found nothing, move the table back toward neutral.
+
+        The table exists to make the next run cheaper, and it can only do that if
+        what it learned is still true. A run that spent its budget and produced no
+        evidence anywhere is the signal that it is not: whatever the table
+        believes about this kind of target did not hold here. Time-based
+        evaporation would eventually get to the same place, but "eventually" is
+        measured against a half-life while the operator is looking at an empty
+        report.
+
+        Strength is scaled by how much was spent. A run that sent four requests
+        and found nothing says almost nothing; one that spent its whole budget
+        says a great deal. Evidence anywhere in the run cancels this entirely -
+        the trail that produced it earned its weight.
+        """
+        if self.ctx.pheromone is None or not self.ctx.pheromone.enabled:
+            return
+        if self.ctx.blackboard.findings() or self.ctx.blackboard.get("proven"):
+            return
+
+        spent = self.ctx.blackboard.requests_sent()
+        if spent < 8:
+            return
+        strength = min(0.6, spent / max(1, self.ctx.max_requests))
+        if strength <= 0:
+            return
+        moved = self.ctx.pheromone.recalibrate(strength)
+        if moved:
+            self.ctx.info(
+                f"nothing was found here in {spent} requests; recalibrating "
+                f"{moved} rewrite preference(s) toward the middle"
+            )
 
     def _transition(self, state: State) -> tuple[str | None, str]:
         """First transition whose condition holds, evaluated exactly once."""

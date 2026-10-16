@@ -73,7 +73,11 @@ if [ -f "$LAB/internal.pid" ] && kill -0 "$(cat "$LAB/internal.pid")" 2>/dev/nul
     sleep 0.5
 fi
 ip addr add 169.254.169.254/32 dev lo 2>/dev/null || true
-nohup python3 "$LAB/internal.py" > "$LAB/logs/internal.log" 2>&1 &
+# setsid, not a bare `nohup ... &`: these are started over SSH, and a process that
+# stays in the session's process group is killed when that session closes. The
+# symptom is silent - the internal services are simply not there the next time,
+# every SSRF probe into them fails, and the tool looks like it found nothing.
+setsid nohup python3 "$LAB/internal.py" > "$LAB/logs/internal.log" 2>&1 < /dev/null &
 echo $! > "$LAB/internal.pid"
 
 # A real FastCGI listener on 9000. A php-fpm pool rather than `php-cgi -b`: both
@@ -97,7 +101,7 @@ user = www-data
 group = www-data
 catch_workers_output = yes
 EOF
-        nohup "$FPM_BIN" --nodaemonize --fpm-config /tmp/iklab-fpm.conf > "$LAB/logs/php-fpm.log" 2>&1 &
+        setsid nohup "$FPM_BIN" --nodaemonize --fpm-config /tmp/iklab-fpm.conf > "$LAB/logs/php-fpm.log" 2>&1 < /dev/null &
         echo $! > "$LAB/phpfpm.pid"
     fi
     echo "  php-fpm ($FPM_BIN) on 127.0.0.1:9000"
@@ -115,7 +119,7 @@ sed -n '1,12p' "$LAB/logs/internal.log"
 if command -v javac >/dev/null 2>&1; then
     if ! ss -lnt | grep -q '127.0.0.1:9100'; then
         (cd "$LAB/javalab" && javac ProtoLab.java 2>/dev/null)
-        nohup java -cp "$LAB/javalab" ProtoLab 9100 > "$LAB/logs/javalab.log" 2>&1 &
+        setsid nohup java -cp "$LAB/javalab" ProtoLab 9100 > "$LAB/logs/javalab.log" 2>&1 < /dev/null &
         echo $! > "$LAB/javalab.pid"
         sleep 2
     fi

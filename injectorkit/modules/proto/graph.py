@@ -25,6 +25,7 @@ import secrets
 from ...core.filters import php_runner
 from ...core.mutate import Kind, Variant
 from ...engine.blackboard import Confidence
+from ...engine.evidence import Judge, Verdict
 from ...engine.inject import (
     candidates as _candidates,
     inject as _inject,
@@ -82,12 +83,22 @@ def _targets_for(wrapper: Wrapper, targets: list[str]) -> list[str]:
     A file the application serves is the right first question for a PHP filter,
     and the wrong one for a Java file reader, which cannot see the web root at
     all. One target per wrapper keeps the request count honest.
+
+    An absolute path goes first for a wrapper that takes a plain path, because a
+    relative name is a guess about the working directory that a container is
+    free to place somewhere else. A target that refuses every `://` spelling
+    leaves only this wrapper, so the one path it gets has to be the one most
+    likely to exist on any host.
     """
     if not targets:
         return []
     if wrapper.family in _SYSTEM_FAMILIES:
         system = [t for t in targets if t.startswith("/")]
         return (system or targets)[:1]
+    if "://" not in wrapper.payload:
+        absolute = [t for t in targets if t.startswith("/")]
+        if absolute:
+            return absolute[:1]
     return targets[:1]
 
 
@@ -127,6 +138,42 @@ def _signatures_for(wrapper: Wrapper, named: bool) -> tuple[str, ...]:
     if not named:
         return tuple(wrapper.signatures)
     return tuple(wrapper.signatures) + NAMED_FILE_SIGNATURES
+
+
+# A path no application has. Asking the same wrapper for it is what turns "the
+# response changed" into evidence: if reading the named file and reading a file
+# that does not exist produce the same bytes, nothing was read - whatever the
+# signatures say - and if they differ, the difference came from the file.
+MISSING_PATH = "/nonexistent-ik-probe/does-not-exist"
+
+
+def _differs_from_missing(
+    ctx: RunContext, param, wrapper: Wrapper, target: str, seen: str, payload: str
+) -> bool:
+    """Whether asking for a file that is not there produces something else.
+
+    The signature lists can only recognise files somebody already knew about. An
+    operator naming a flag, a key or a config is asking about a file whose
+    contents nobody can predict, and a wrapper that reads it perfectly well comes
+    back with bytes no table matches. One extra request answers what a table
+    cannot: the same wrapper, the same parameter, a path that cannot exist.
+
+    The comparison is made after each payload is removed from its own response.
+    A page that reflects the parameter back is the normal case, and there the two
+    responses differ by construction - they carry different payloads. Comparing
+    them raw would call every named file a success on exactly the pages where the
+    reflection warning fires, which is the opposite of useful.
+    """
+    if target == MISSING_PATH:
+        return False
+    control = wrapper.payload.format(file=MISSING_PATH)
+    outcome = _inject(ctx, param, control, "probe.read.control")
+    if outcome is None:
+        return False
+    _, exchange = outcome
+    if exchange.response.error:
+        return False
+    return Judge.strip_echo(exchange.response.text, control) != Judge.strip_echo(seen, payload)
 
 
 def _proven(ctx: RunContext, wrapper: Wrapper, param, variant, request, verdict, note: str = "") -> None:
@@ -180,12 +227,24 @@ def _try_wrapper(ctx: RunContext, param, wrapper: Wrapper, action: str, targets:
         request, exchange, variant = outcome
         if exchange.response.error:
             continue
+        named = bool(ctx.config.get("read"))
         verdict = ctx.judge.signature(
             exchange.response,
-            _signatures_for(wrapper, bool(ctx.config.get("read"))),
+            _signatures_for(wrapper, named),
             variant.value,
             param.value,
         )
+        if not verdict.confirmed and named:
+            # No signature matched, but a file the operator named may simply have
+            # contents no table could list. One control request separates "the
+            # wrapper read it" from "the wrapper answered with the page".
+            if _differs_from_missing(ctx, param, wrapper, target, exchange.response.text, variant.value):
+                verdict = Verdict(
+                    confirmed=True,
+                    confidence=Confidence.LIKELY,
+                    reason="the response differs from the same wrapper asking for a path that does not exist",
+                    matched=target,
+                )
         if not verdict.confirmed:
             continue
         _proven(ctx, wrapper, param, variant, request, verdict)

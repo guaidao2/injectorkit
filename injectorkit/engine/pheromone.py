@@ -137,7 +137,38 @@ class PheromoneTable:
         trail.updated = time.time()
         self.dirty = True
 
-    # --------------------------------------------------------------- ordering
+    def recalibrate(self, strength: float = 1.0) -> int:
+        """Pull every trail back toward neutral, because the food ran out.
+
+        Evaporation here is driven by time, and time is the wrong trigger for the
+        case that matters. When a target yields nothing at all, the conclusion
+        that "this rewrite gets through" is not old, it is wrong - and a table
+        that only forgets with age keeps steering the next attempt by it. That is
+        the opposite of what a colony does: with no food found it stops walking
+        the old trail and spreads out again.
+
+        So a run that found nothing calls this with the strength of its failure.
+        Weight moves toward neutral in both directions, which means a trail that
+        looked good stops leading and one that looked bad gets another hearing.
+        Nothing here deletes: the counts and the verified flag stay, and a trail
+        that keeps earning will climb back.
+
+        Returns how many trails moved.
+        """
+        if not self.enabled or strength <= 0:
+            return 0
+        pull = min(1.0, strength)
+        moved = 0
+        for trail in self.trails.values():
+            target = NEUTRAL
+            updated = trail.weight + (target - trail.weight) * pull
+            if abs(updated - trail.weight) > 1e-9:
+                trail.weight = max(0.0, min(1.0, updated))
+                trail.updated = time.time()
+                moved += 1
+        if moved:
+            self.dirty = True
+        return moved
 
     def rank(self, family: str, variants) -> list:
         """Order variants by what is most likely to get through.
@@ -145,6 +176,14 @@ class PheromoneTable:
         Generation 0 keeps its place at the front whatever the table says: it
         costs one request and it is the only spelling that needs no justification
         - an unprotected target should never be sent a mutation.
+
+        Below that, an untried rewrite is not ranked by a weight it does not have,
+        and it is not put last either. It slots in at neutral: behind a rewrite
+        this target has already been seen to accept, ahead of one that has been
+        tried and did not work. Ranking the unknown last is how a table that has
+        learned a lot about a target stops finding out about the rewrites it never
+        reached - the frontier is where the next thing is, and it has to stay
+        reachable.
         """
         if not self.enabled:
             return list(variants)
@@ -152,7 +191,9 @@ class PheromoneTable:
         def sort_key(variant):
             if not variant.mutators:
                 return (0, 0.0, variant.generation)
-            return (1, -self.weight(family, variant.mutators), variant.generation)
+            trail = self.trails.get(self.key(family, variant.mutators))
+            ranking = NEUTRAL if trail is None else self.weight(family, variant.mutators)
+            return (1, -ranking, variant.generation)
 
         return sorted(variants, key=sort_key)
 

