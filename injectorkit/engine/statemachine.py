@@ -183,16 +183,19 @@ class Engine:
             state = self.graph.state(current)
             self.visited.append(state.name)
             self.ctx.state = state.name
-            self.ctx.log(f"== {state.name}: {state.description}")
+            # What the run is about to do, in the words the operator would use.
+            # This is the line that makes a scan readable while it runs, so it
+            # belongs with the progress output rather than behind -v.
+            self.ctx.info(state.description)
 
             advanced = False
             for action in state.actions:
                 if self.ctx.stopped:
                     break
                 if self.ctx.blackboard.is_dead(action.id):
-                    self.ctx.log(f"   skipped {action.id} ({self.ctx.blackboard.dead_ends[action.id]})")
+                    self.ctx.log(f"   already ruled out: {action.description}")
                     continue
-                self.ctx.log(f"-> {action.id}: {action.description}")
+                self.ctx.info(f"testing {action.description}")
                 try:
                     action.run(self.ctx)
                 except Exception as error:  # a broken action must not end the run

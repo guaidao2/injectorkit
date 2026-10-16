@@ -60,8 +60,25 @@ class Verdict:
 class Judge:
     """Turns responses into verdicts."""
 
-    def __init__(self, baseline: bytes | None = None) -> None:
+    def __init__(self, baseline: bytes | None = None, on_echo=None) -> None:
         self.baseline = (baseline or b"").decode("latin-1", "replace").lower()
+        self.on_echo = on_echo
+        self._said_echo = False
+
+    def _note_echo(self, text: str, payload: str) -> None:
+        """Say once that the page reflects what it is given.
+
+        Worth telling the operator, because it changes how every response on
+        this target has to be read: a page that prints the parameter back makes
+        each payload look like it changed something. The work of filtering it out
+        happens anyway; saying so is what stops the next result being trusted for
+        the wrong reason.
+        """
+        if self._said_echo or not payload or self.on_echo is None:
+            return
+        if payload in text:
+            self._said_echo = True
+            self.on_echo()
 
     # ------------------------------------------------------------- signatures
 
@@ -73,6 +90,7 @@ class Judge:
         original: str = "",
     ) -> Verdict:
         """Look for a signature that only a successful read or fetch produces."""
+        self._note_echo(response.text, payload)
         # The payload is removed before any decoding, not after: a page that
         # echoes what it was given hands back the base64 blob the payload
         # carried, and decoding that blob produces the very string a signature

@@ -184,5 +184,38 @@ class AnEchoIsRestoredNotJustRemoved(unittest.TestCase):
         self.assertEqual(judge.restore_echo("%20", "%20", " "), " ")
 
 
+class AReflectionIsReported(unittest.TestCase):
+    """A page that echoes the parameter makes every payload look like it worked.
+
+    The reflection is filtered out anyway; saying so once is what stops the next
+    result being trusted for the wrong reason.
+    """
+
+    def test_the_echo_is_reported(self):
+        said: list[int] = []
+        Judge(on_echo=lambda: said.append(1)).signature(
+            response(b"<p>PAYLOAD</p>"), ("nope",), "PAYLOAD"
+        )
+        self.assertEqual(len(said), 1)
+
+    def test_it_is_reported_once_however_many_payloads_are_echoed(self):
+        said: list[int] = []
+        judge = Judge(on_echo=lambda: said.append(1))
+        judge.signature(response(b"<p>ONE</p>"), ("nope",), "ONE")
+        judge.signature(response(b"<p>TWO</p>"), ("nope",), "TWO")
+        self.assertEqual(len(said), 1)
+
+    def test_nothing_is_reported_when_the_page_does_not_echo(self):
+        said: list[int] = []
+        Judge(on_echo=lambda: said.append(1)).signature(
+            response(b"<p>plain</p>"), ("nope",), "PAYLOAD"
+        )
+        self.assertEqual(said, [])
+
+    def test_a_judge_with_no_listener_still_works(self):
+        verdict = Judge().signature(response(b"<p>PAYLOAD</p>"), ("PAYLOAD",), "PAYLOAD")
+        self.assertFalse(verdict.confirmed)
+
+
 if __name__ == "__main__":
     unittest.main()

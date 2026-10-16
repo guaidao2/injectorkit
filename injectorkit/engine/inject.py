@@ -211,7 +211,13 @@ def record(ctx, key: str, value: object, evidence: str, confidence) -> None:
 
 
 def note_finding(ctx, key: str, entry: dict, confidence=None) -> None:
-    """Record a finding and print it. Modules own the key and the wording."""
+    """Record a finding and print it. Modules own the key and the wording.
+
+    Printed as a block rather than a line, because the payload is the part
+    someone reads a scan for: a report that says a parameter is injectable
+    without saying with what cannot be reproduced by hand, and reproducing it by
+    hand is the whole point of finding it.
+    """
     record(
         ctx,
         key,
@@ -219,10 +225,18 @@ def note_finding(ctx, key: str, entry: dict, confidence=None) -> None:
         evidence=entry.get("evidence", ""),
         confidence=confidence or entry.get("confidence") or Confidence.CONFIRMED,
     )
-    ctx.emit(
-        "  [!] {name} via {param}: {evidence}".format(
+    lines = [
+        "[!] {name} via {param}".format(
             name=entry.get("name", "?"),
             param=entry.get("param", "?"),
-            evidence=entry.get("evidence", ""),
         )
-    )
+    ]
+    if entry.get("payload"):
+        lines.append(f"      payload:   {entry['payload']}")
+    if entry.get("evidence"):
+        lines.append(f"      evidence:  {entry.get('evidence', '')}")
+    if entry.get("generation"):
+        lines.append(f"      generation: {entry['generation']}")
+    if entry.get("note"):
+        lines.append(f"      note:      {entry['note']}")
+    ctx.emit("\n".join(lines))

@@ -183,6 +183,43 @@ class Blackboard:
         with open(path, "r", encoding="utf-8") as handle:
             return cls.from_json(handle.read())
 
+    def findings(self) -> list[dict]:
+        """Every finding on the board, across keys, in the order recorded."""
+        out: list[dict] = []
+        for key in sorted(self.facts):
+            if not key.endswith("findings"):
+                continue
+            value = self.facts[key].value
+            if isinstance(value, list):
+                out.extend(item for item in value if isinstance(item, dict))
+        return out
+
+    def render_findings(self) -> str:
+        """The injection points as a block, the way a report is read.
+
+        One block per finding: what was injected, where, and with what. A
+        summary that names a technique but withholds the payload cannot be
+        reproduced by hand, and reproducing it by hand is the only thing anyone
+        does with a finding.
+        """
+        found = self.findings()
+        if not found:
+            return ""
+        lines = ["---"]
+        for item in found:
+            lines.append(f"Parameter: {item.get('param', '?')}")
+            if item.get("name"):
+                lines.append(f"    Test:     {item['name']}")
+            if item.get("family"):
+                lines.append(f"    Family:   {item['family']}")
+            if item.get("payload"):
+                lines.append(f"    Payload:  {item['payload']}")
+            if item.get("evidence"):
+                lines.append(f"    Evidence: {item['evidence']}")
+            lines.append("")
+        lines.append("---")
+        return "\n".join(lines)
+
     def render(self) -> str:
         """Human-readable summary, printed at the end of a run.
 

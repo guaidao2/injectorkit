@@ -120,7 +120,13 @@ def run_shell(args: argparse.Namespace, runtime) -> int:
         graph=build_graph(NAME),
         transport=runtime.transport,
         blackboard=board,
-        judge=Judge(baseline=baseline_body(runtime.transport, request)),
+        judge=Judge(
+            baseline=baseline_body(runtime.transport, request),
+            on_echo=lambda: runtime.warn(
+                "the page reflects the parameter value back; every payload changes the "
+                "response, so the reflection is filtered out before matching"
+            ),
+        ),
         bypass=Bypass(board, enabled=not args.no_bypass),
         oob=runtime.oob,
         pheromone=runtime.pheromone,
@@ -171,7 +177,13 @@ def run_one(request, params, args: argparse.Namespace, runtime) -> None:
         graph=build_graph(NAME),
         transport=runtime.transport,
         blackboard=board,
-        judge=Judge(baseline=baseline_body(runtime.transport, request)),
+        judge=Judge(
+            baseline=baseline_body(runtime.transport, request),
+            on_echo=lambda: runtime.warn(
+                "the page reflects the parameter value back; every payload changes the "
+                "response, so the reflection is filtered out before matching"
+            ),
+        ),
         bypass=Bypass(board, enabled=not args.no_bypass),
         oob=runtime.oob,
         pheromone=runtime.pheromone,
@@ -194,4 +206,8 @@ def run_one(request, params, args: argparse.Namespace, runtime) -> None:
     Engine(context.graph, context).run()
     runtime.emit("")
     runtime.emit(board.render())
+    points = board.render_findings()
+    if points:
+        runtime.emit("")
+        runtime.emit(points)
     close_board(args, board)
