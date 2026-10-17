@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Put donothack in front of the lab and report what it is doing.
 #
-#   bash waf-donothack.sh            PHP lab  8090 -> 8080
+#   bash waf-donothack.sh            PHP lab  8090 -> the lab's port
 #   bash waf-donothack.sh 9100       Java lab 8090 -> 9100
 #   bash waf-donothack.sh stop       take it down
 #
@@ -16,7 +16,12 @@ set -uo pipefail
 
 DNH=${DNH:-/opt/donothack/donothack_1.3.4_linux_amd64}
 HERE=$(cd "$(dirname "$0")" && pwd)
-UPSTREAM_PORT=${1:-8080}
+# The upstream is whichever side of the lab you want in front of the filter: the
+# PHP application by default, or the Java one when its port is named. The argument
+# is still what the usage at the top of this file promises - an earlier edit here
+# replaced it with the lab's own port and left the usage telling people to pass
+# 9100, which then silently put the filter in front of the PHP side instead.
+UPSTREAM_PORT=${1:-${IK_PORT:-18080}}
 LISTEN_PORT=8090
 
 if [ ! -x "$DNH/donothack" ]; then

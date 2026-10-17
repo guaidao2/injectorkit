@@ -97,6 +97,31 @@ def route_via(ctx, payload: str) -> tuple[str, bool]:
     return templates[0].replace(VIA_PLACEHOLDER, payload), True
 
 
+def climb_order(max_generation: int) -> list[int]:
+    """The generations to try, in the order to try them: every one, bottom up.
+
+    There used to be a floor here - `start = ctx.bypass.floor(host, action)`, where
+    an earlier run had got through - and the climb began there instead of at zero.
+    It saved requests when the floor was right and removed work when it was wrong,
+    and the second is not a cost this can pay: a filter that compared its blocklist
+    without folding case was reachable with `PHP://`, which is generation 1, while
+    the floor stood at 2 from an earlier run. Generation 1 was never sent. 164
+    requests, 86 refused, the read reported as not done.
+
+    Reordering was not enough either. The climb stops at the first generation
+    where a rewrite was not refused, so putting the floor's generations first only
+    helps while they are all refused; on a target that accepts them, the climb
+    settles there and never descends. And the floor only ever rose, so a wrong one
+    was never corrected - it stayed in the session and was paid for on every run.
+
+    So the order is the plain ascent, generation 0 first. That is also what this
+    project says a prior is allowed to do: order the work, never decide that work
+    is unnecessary. Which rewrite is likely to get through is the pheromone
+    table's job, and it already learns that per mutator.
+    """
+    return list(range(max_generation + 1))
+
+
 def inject_escalating(
     ctx,
     param: Param,
@@ -141,7 +166,6 @@ def inject_escalating(
     supplies the name.
     """
     host = template(ctx).host()
-    start = ctx.bypass.floor(host, action)
     # What a refused rewrite proves, and what it does not. A blocklist matches
     # literals, and payload families carry different ones: `gopher://<internal>`
     # keeps a scheme for the filter to catch however the address is spelled,
@@ -182,7 +206,7 @@ def inject_escalating(
         elif ctx.pheromone is not None:
             ctx.pheromone.punish(scope, ("pollute",))
 
-    for generation in range(start, max_generation + 1):
+    for generation in climb_order(max_generation):
         pool = [
             variant
             for variant in ctx.variants(
@@ -235,9 +259,12 @@ def inject_escalating(
                     # the response, and the caller scores that when it finds
                     # evidence.
                     ctx.pheromone.reward(scope, variant.mutators, amount=0.25)
-                if generation > start:
+                if generation > 0:
+                    # Kept as a note about the target, not as a bound on the
+                    # climb: nothing reads it to decide where to start, because
+                    # a floor that is wrong removes work instead of ordering it.
                     ctx.bypass.raise_floor(host, action, generation)
-                    ctx.log(f"   {action}: generation {generation} reached the target, floor raised")
+                    ctx.log(f"   {action}: generation {generation} reached the target")
                 return last
             # Accepted, but the caller's question is not answered yet. Nothing is
             # rewarded and no floor is raised: this rewrite got past the filter

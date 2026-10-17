@@ -298,8 +298,9 @@ error echo, timing only, out-of-band), the filter profile, accepted schemes,
 fingerprinted internal services, and dead ends that must not be retried.
 
 Payloads are never stored, they are derived: a semantically correct seed plus
-meaning-preserving mutators, ordered by generation, with the generation that
-gets past a filter remembered so later actions start there.
+meaning-preserving mutators, ordered by generation. The climb starts at the
+plain spelling and goes up, because a generation that worked before is a guess
+about where to look, not proof that the ones below it cannot.
 
 Which rewrite to try first is learned rather than hard-coded. Every rewrite that
 gets past a filter deposits weight, every one that is refused takes weight away,

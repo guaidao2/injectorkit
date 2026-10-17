@@ -13,7 +13,7 @@
 set -euo pipefail
 
 LAB=/opt/injectorkit-lab
-PORT=8080
+PORT=${IK_PORT:-18080}
 # The PowerShell endpoint runs under its own server; see the note near the end.
 PS_PORT=8086
 REQUIRED_FILES=(www/index.php www/fetch.php www/include.php www/read.php www/redirect.php internal.py waf.py javalab/ProtoLab.java)
@@ -33,6 +33,13 @@ fi
 echo "  flag: $LAB/flag.txt"
 
 echo "[2/6] apache on :$PORT"
+# An earlier version of this script wrote its vhost to a differently named file.
+# Left enabled, it keeps Apache listening on the port it names - which is how the
+# lab held 8080 after being moved off it, and how a port somebody wanted for
+# something else stayed taken. Removed outright, not disabled: the current file
+# is the only one this lab should have.
+rm -f /etc/apache2/sites-enabled/injectorkit-lab.conf \
+      /etc/apache2/sites-available/injectorkit-lab.conf
 # The metadata service owns 169.254.169.254:80, and Apache's default site would
 # bind 0.0.0.0:80 and take it. Both changes are undone by teardown.sh.
 a2dissite 000-default >/dev/null 2>&1 || true
@@ -70,10 +77,19 @@ fi
 redis-cli -h 127.0.0.1 ping
 
 echo "[4/6] internal services"
-if [ -f "$LAB/internal.pid" ] && kill -0 "$(cat "$LAB/internal.pid")" 2>/dev/null; then
-    kill "$(cat "$LAB/internal.pid")" 2>/dev/null || true
-    sleep 0.5
-fi
+# Killed by name, not by the pid file. The pid recorded below is the one `setsid`
+# forks, and it is not always the python process, so a stale file means the old
+# instance keeps the ports while the new instance binds none of them - every
+# service logs UNAVAILABLE and the lab looks like it has no internal services at
+# all, which reads as the SSRF probes finding nothing.
+pkill -f "[i]nternal.py" 2>/dev/null || true
+# And wait for them to actually go. SO_REUSEADDR does not let a second listener
+# share a port with a live one, so starting before the old one has exited is the
+# same failure one step later.
+for _ in $(seq 1 24); do
+    ss -lnt | grep -qE '127\.0\.0\.1:(2375|2379|8899|11211|9200|8500|10255) ' || break
+    sleep 0.25
+done
 ip addr add 169.254.169.254/32 dev lo 2>/dev/null || true
 # setsid, not a bare `nohup ... &`: these are started over SSH, and a process that
 # stays in the session's process group is killed when that session closes. The
@@ -160,16 +176,24 @@ if command -v pwsh >/dev/null 2>&1; then
     sleep 1
 fi
 
-# The five signature profiles. They sit in front of the application rather than
-# being part of it, so nothing above starts them - and a rebooted Kali then
-# answers those scenarios as skips, which is not the same answer as a pass.
-# Started here so that "run the lab" means the whole lab.
-for profile_port in 8081 8082 8083 8084 8085; do
-    pkill -f "python3 .*waf.py $profile_port" 2>/dev/null || true
+# The signature profiles. They sit in front of the application rather than being
+# part of it, so nothing above starts them - and a rebooted Kali then answers
+# those scenarios as skips, which is not the same answer as a pass. Started here
+# so that "run the lab" means the whole lab.
+#
+# Port and profile are named together. Passing only the port is how a profile
+# silently ran as `a`: waf.py reads `--profile` and falls back to "a", so a
+# case-sensitive filter would have been started case-insensitive and the run that
+# needed it proved nothing.
+PROFILE_PORTS="8081:a 8082:b 8083:c 8084:d 8085:e 8088:f"
+for spec in $PROFILE_PORTS; do
+    pkill -f "python3 .*waf.py .*${spec%%:*}" 2>/dev/null || true
 done
 sleep 1
-for profile_port in 8081 8082 8083 8084 8085; do
-    setsid nohup python3 "$LAB/waf.py" "$profile_port" \
+for spec in $PROFILE_PORTS; do
+    profile_port=${spec%%:*}
+    profile_name=${spec##*:}
+    setsid nohup python3 "$LAB/waf.py" --profile "$profile_name" "$profile_port" \
         > "$LAB/logs/waf-$profile_port.log" 2>&1 &
 done
 sleep 1
@@ -183,9 +207,9 @@ cat <<EOF
   cmdi       http://<this-host>:$PORT/cmdi.php?cmd=<cmd>|host=<arg>|bash=<cmd>|safe=<arg>
   powershell http://<this-host>:$PS_PORT/cmdi.php?ps=<cmd>   (own server; see the note above)
   java       http://<this-host>:9100/fetch?url=<url>   (jar:, jrt:, netdoc:)
-  profiles   8081-8085, the five signature filters the waf group asks about
+  profiles   8081-8085 and 8088, the signature filters the scenarios ask about
              (8081 literal / 8082 spellings / 8083 semantic / 8084 whitelist /
-             8085 first value of each parameter)
+             8085 first value of each parameter / 8088 compares case exactly)
 
   internal   redis 127.0.0.1:6379 (real)
              metadata 169.254.169.254:80, docker :2375, etcd :2379, kubelet :10255,

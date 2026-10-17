@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import os
 import socket
 import sys
 import unicodedata
@@ -25,7 +26,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
-UPSTREAM = "http://127.0.0.1:8080"
+UPSTREAM = "http://127.0.0.1:" + os.environ.get("IK_PORT", "18080")
 
 # Profile A knows the dotted form and the usual scheme literals. Address
 # spellings walk straight past it.
@@ -88,6 +89,16 @@ PROFILES = {
     # shape: the filter takes `query["x"]`, an application-language parser takes
     # the last one, and the two never look at the same string.
     "e": {"type": "blocklist", "signatures": PROFILE_A, "hpp": "first"},
+    # The same signatures as `a`, compared without folding case. A rule set that
+    # gets the pattern right and the comparison wrong is a different target from
+    # one with a weak pattern, and `PHP://` is the spelling that tells them apart:
+    # this profile has to miss it, because that is what an exact comparison does.
+    "f": {
+        "type": "blocklist",
+        "signatures": PROFILE_A,
+        "normalise": True,
+        "fold_case": False,
+    },
 }
 
 REFUSAL = b"Request blocked: the parameter you supplied is not allowed (lab-waf)"
@@ -163,12 +174,17 @@ def _parameter_values(path: str, mode: str = "") -> list[str]:
     return [value for values in query.values() for value in values]
 
 
-def _normalise(path: str) -> str:
+def _normalise(path: str, fold_case: bool = True) -> str:
     """What a strict rule set does before matching.
 
     Encoding is undone until it stops changing anything, Unicode is folded to
     its compatibility form, and comments and whitespace are dropped - the
     transformations a signature that keeps up with evasions has to apply.
+
+    `fold_case=False` is a rule set that does not: it compares bytes, so a
+    spelling that only differs in case walks past it. That is not the same
+    defect as a weak pattern - the pattern is exact, the comparison is the
+    mistake - and it is worth being able to tell the two apart on a target.
     """
     text = unquote(path)
     for _ in range(4):
@@ -179,7 +195,7 @@ def _normalise(path: str) -> str:
     text = unicodedata.normalize("NFKC", text)
     for token in ("/**/", "/*!*/", " ", "\t", "\n", "\r", "\\"):
         text = text.replace(token, "")
-    return text.lower()
+    return text.lower() if fold_case else text
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -203,7 +219,11 @@ class Handler(BaseHTTPRequestHandler):
             return not self._allowed(path, profile["allowed"])
         if profile["type"] == "semantic":
             return _semantic_block(path)
-        raw = _normalise(path) if profile.get("normalise") else unquote(path).lower()
+        raw = (
+            _normalise(path, profile.get("fold_case", True))
+            if profile.get("normalise")
+            else unquote(path).lower()
+        )
         if "patterns" in profile:
             return any(re.search(pattern, raw) for pattern in profile["patterns"])
         if profile.get("hpp") == "first":

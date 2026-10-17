@@ -25,11 +25,17 @@ echo "[2/4] redis"
 redis-cli -h 127.0.0.1 shutdown nosave 2>/dev/null || true
 
 echo "[3/4] apache"
-a2dissite injectorkit-lab >/dev/null 2>&1 || true
-rm -f /etc/apache2/sites-available/injectorkit-lab.conf
+# setup.sh writes its vhost into 000-default.conf, so that is the one that has to
+# go. Disabling the old `injectorkit-lab` name did nothing except leave the lab
+# listening on its port: the file that name refers to has not been written since
+# 0.1.0, and "the port is still taken after teardown" is the same defect as a
+# stale vhost keeping 8080 alive.
+a2dissite 000-default >/dev/null 2>&1 || true
+rm -f /etc/apache2/sites-available/000-default.conf
+rm -f /etc/apache2/sites-available/injectorkit-lab.conf \
+      /etc/apache2/sites-enabled/injectorkit-lab.conf
 if grep -qE '^#Listen 80 ' /etc/apache2/ports.conf; then
     sed -i 's|^#Listen 80 .*|Listen 80|' /etc/apache2/ports.conf
-    a2ensite 000-default >/dev/null 2>&1 || true
 fi
 apache2ctl configtest >/dev/null 2>&1 && systemctl restart apache2 || true
 
